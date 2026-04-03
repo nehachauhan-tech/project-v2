@@ -1,21 +1,22 @@
 @import "tailwindcss";
 
 :root {
-  --background: #eeeeee;
-  --foreground: #000000;
+  --foreground: #ffffff;
   --font-plus-jakarta: var(--font-plus-jakarta-sans);
 }
 
 @theme inline {
-  --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-plus-jakarta);
 }
 
 body {
-  background: var(--background);
+  margin: 0;
+  padding: 0;
   color: var(--foreground);
   font-family: var(--font-plus-jakarta), sans-serif;
+  overflow-x: hidden;
+  background: #0a0a0a;
 }
 
 @layer utilities {
