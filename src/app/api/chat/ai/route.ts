@@ -1,10 +1,17 @@
 import { GoogleGenAI, type HarmCategory, type HarmBlockThreshold, type ThinkingLevel } from '@google/genai';
 import { NextResponse } from 'next/server';
-import { AI_CHARACTERS, CHARACTER_MAP } from '@/data/characters';
+import { CHARACTER_MAP } from '@/data/characters';
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GOOGLE_CLOUD_API_KEY!,
 });
+
+// Only Gemini 3.x preview models support thinking config
+const THINKING_MODELS = new Set([
+  'gemini-3-flash-preview',
+  'gemini-3.1-pro-preview',
+  'gemini-3.1-flash-lite-preview',
+]);
 
 export async function POST(req: Request) {
   try {
@@ -17,7 +24,6 @@ export async function POST(req: Request) {
 
     const modelId = character.model;
 
-    // Mood-aware system prompt: analyze message sentiment for natural responses
     const moodContext = `
 MOOD SYSTEM: You must respond according to the emotional tone of the user's message.
 - If the user seems sad or stressed, respond with empathy and comfort (like a real human friend would).
@@ -30,13 +36,10 @@ MOOD SYSTEM: You must respond according to the emotional tone of the user's mess
 
     const systemInstruction = character.systemPrompt + '\n\n' + moodContext;
 
-    const generationConfig = {
+    const generationConfig: Record<string, any> = {
       maxOutputTokens: 4096,
       temperature: 1,
       topP: 0.95,
-      thinkingConfig: {
-        thinkingLevel: "HIGH" as ThinkingLevel,
-      },
       safetySettings: [
         { category: 'HARM_CATEGORY_HATE_SPEECH' as HarmCategory, threshold: 'OFF' as HarmBlockThreshold },
         { category: 'HARM_CATEGORY_DANGEROUS_CONTENT' as HarmCategory, threshold: 'OFF' as HarmBlockThreshold },
@@ -48,6 +51,13 @@ MOOD SYSTEM: You must respond according to the emotional tone of the user's mess
         parts: [{ text: systemInstruction }],
       },
     };
+
+    // Only add thinking config for models that support it
+    if (THINKING_MODELS.has(modelId)) {
+      generationConfig.thinkingConfig = {
+        thinkingLevel: 'HIGH' as ThinkingLevel,
+      };
+    }
 
     const formattedHistory = (history || []).map((h: any) => ({
       role: h.role === 'assistant' ? 'model' : 'user',

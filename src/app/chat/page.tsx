@@ -120,9 +120,14 @@ export default function ChatPage() {
     if (data) setMessages(data);
   };
 
-  // ─── Init Auth & Presence ───
+  // Track current user ID in a ref so realtime callbacks can access it
+  const userRef = useRef<any>(null);
+  userRef.current = user;
+
+  // ─── Init Auth, Presence & Global Realtime ───
   useEffect(() => {
     let presenceChannel: any = null;
+    let conversationsSub: any = null;
 
     const init = async () => {
       const { data: { user: currentUser } } = await supabase_client.auth.getUser();
@@ -147,6 +152,7 @@ export default function ChatPage() {
         .order('display_name');
       if (profiles) setAllProfiles(profiles);
 
+      // ── Presence channel ──
       presenceChannel = supabase_client.channel('online_users', {
         config: { presence: { key: currentUser.id } },
       });
@@ -168,14 +174,32 @@ export default function ChatPage() {
           }
         });
 
+      // ── Global conversations realtime ──
+      // Refreshes sidebar when any conversation is updated (new message from anyone)
+      conversationsSub = supabase_client
+        .channel('global_conversations')
+        .on('postgres_changes', {
+          event: '*',
+          schema: 'public',
+          table: 'project_v2_conversations',
+        }, () => {
+          // Refresh conversations list when any conversation changes
+          const uid = userRef.current?.id;
+          if (uid) fetchConversations(uid);
+        })
+        .subscribe();
+
       setLoading(false);
     };
 
     init();
-    return () => { presenceChannel?.unsubscribe(); };
+    return () => {
+      presenceChannel?.unsubscribe();
+      conversationsSub?.unsubscribe();
+    };
   }, [router]);
 
-  // ─── Realtime messages ───
+  // ─── Realtime messages for active conversation ───
   useEffect(() => {
     if (!activeConversation) return;
     fetchMessages(activeConversation.id);
@@ -188,17 +212,27 @@ export default function ChatPage() {
         table: 'project_v2_messages',
         filter: `conversation_id=eq.${activeConversation.id}`,
       }, (payload) => {
-        setMessages((prev) => [...prev, payload.new as Message]);
+        const newMsg = payload.new as Message;
+        // Deduplicate: only add if not already in messages list
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === newMsg.id)) return prev;
+          return [...prev, newMsg];
+        });
       })
       .subscribe();
 
     return () => { sub.unsubscribe(); };
   }, [activeConversation]);
 
-  // ─── Auto-scroll ───
+  // ─── Auto-scroll on new messages ───
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      // Use requestAnimationFrame to ensure DOM has updated before scrolling
+      requestAnimationFrame(() => {
+        if (scrollRef.current) {
+          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }
+      });
     }
   }, [messages]);
 

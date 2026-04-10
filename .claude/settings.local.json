@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run:*)",
+      "WebFetch(domain:ai.google.dev)",
+      "WebFetch(domain:developers.google.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.cloud.google.com)",
+      "WebFetch(domain:aistudio.google.com)",
+      "WebFetch(domain:googleapis.github.io)",
+      "WebFetch(domain:support.google.com)",
+      "Bash(git add:*)"
+    ]
+  }
+}
