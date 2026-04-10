@@ -16,21 +16,38 @@ body {
   color: var(--foreground);
   font-family: var(--font-plus-jakarta), sans-serif;
   overflow-x: hidden;
-  background: #0a0a0a;
+  background: #09090b;
+}
+
+/* Custom scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
 }
 
 @layer utilities {
   .glass {
-    @apply bg-white/70 backdrop-blur-xl border border-white/20 shadow-sm rounded-2xl;
+    @apply bg-white/[0.05] backdrop-blur-xl border border-white/[0.08] shadow-sm;
+  }
+  .glass-strong {
+    @apply bg-white/[0.08] backdrop-blur-2xl border border-white/[0.12] shadow-lg;
   }
 }
 
 @layer components {
   .btn-primary {
-    @apply bg-black text-white px-8 py-3 rounded-xl font-semibold transition-all duration-300 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50;
+    @apply bg-emerald-500 text-black px-6 py-3 rounded-xl font-semibold transition-all duration-200 hover:bg-emerald-400 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed;
   }
-  
   .btn-secondary {
-    @apply border-2 border-black text-black px-8 py-3 rounded-xl font-semibold transition-all duration-300 hover:bg-black hover:text-white active:scale-[0.98];
+    @apply border border-white/20 text-white px-6 py-3 rounded-xl font-semibold transition-all duration-200 hover:bg-white/10 active:scale-[0.98];
   }
 }

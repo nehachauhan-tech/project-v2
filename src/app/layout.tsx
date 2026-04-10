@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Plus_Jakarta_Sans } from "next/font/google";
+import { AuthProvider } from "@/context/AuthContext";
 import "./globals.css";
 
 const plusJakartaSans = Plus_Jakarta_Sans({
@@ -9,8 +10,9 @@ const plusJakartaSans = Plus_Jakarta_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "AI Roleplay Chat | Anonymous Connection",
-  description: "Connect with random people or AI personas anonymously. No ID, no number, just raw connection.",
+  title: "Talkr - Anonymous AI & Real Chat",
+  description:
+    "Chat anonymously with AI roleplay characters or real people online. No identity required.",
 };
 
 export default function RootLayout({
@@ -23,8 +25,8 @@ export default function RootLayout({
       lang="en"
       className={`${plusJakartaSans.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col font-sans selection:bg-black selection:text-white">
-        {children}
+      <body className="min-h-full flex flex-col font-sans selection:bg-emerald-500/30 selection:text-white">
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );
