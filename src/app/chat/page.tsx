@@ -40,10 +40,9 @@ function formatDate(dateStr: string) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-// ─── Music Player Component ───
+// ─── Music Player ───────────────────────────────────────────
 function MusicPlayer({ mood, accentColor }: { mood: string; accentColor: string }) {
   const [isPlaying, setIsPlaying] = useState(false);
-
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06]">
       <button
@@ -51,25 +50,16 @@ function MusicPlayer({ mood, accentColor }: { mood: string; accentColor: string 
         className="p-1 rounded-md hover:bg-white/[0.08] transition-colors"
         title={isPlaying ? 'Mute' : 'Play mood music'}
       >
-        {isPlaying ? (
-          <Volume2 className="w-4 h-4" style={{ color: accentColor }} />
-        ) : (
-          <VolumeX className="w-4 h-4 text-white/30" />
-        )}
+        {isPlaying
+          ? <Volume2 className="w-4 h-4" style={{ color: accentColor }} />
+          : <VolumeX className="w-4 h-4 text-white/30" />}
       </button>
       <div className="flex items-center gap-1">
         {isPlaying && (
           <div className="flex items-end gap-[2px] h-3">
             {[10, 14, 8, 12].map((h, i) => (
-              <div
-                key={i}
-                className="w-[3px] rounded-full animate-pulse"
-                style={{
-                  backgroundColor: accentColor,
-                  height: `${h}px`,
-                  animationDelay: `${i * 150}ms`,
-                  animationDuration: '0.8s',
-                }}
+              <div key={i} className="w-[3px] rounded-full animate-pulse"
+                style={{ backgroundColor: accentColor, height: `${h}px`, animationDelay: `${i * 150}ms`, animationDuration: '0.8s' }}
               />
             ))}
           </div>
@@ -80,224 +70,312 @@ function MusicPlayer({ mood, accentColor }: { mood: string; accentColor: string 
   );
 }
 
+// ─── Main Page ───────────────────────────────────────────────
 export default function ChatPage() {
-  const [user, setUser] = useState<any>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
-  const [allProfiles, setAllProfiles] = useState<Profile[]>([]);
+  const [user, setUser]                         = useState<any>(null);
+  const [profile, setProfile]                   = useState<Profile | null>(null);
+  const [conversations, setConversations]       = useState<Conversation[]>([]);
+  const [onlineUsers, setOnlineUsers]           = useState<OnlineUser[]>([]);
+  const [allProfiles, setAllProfiles]           = useState<Profile[]>([]);
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
-  const [activeCharacter, setActiveCharacter] = useState<AICharacter | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [newMessage, setNewMessage] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [showSidebar, setShowSidebar] = useState(true);
-  const [uploading, setUploading] = useState(false);
+  const [activeCharacter, setActiveCharacter]   = useState<AICharacter | null>(null);
+  const [messages, setMessages]                 = useState<Message[]>([]);
+  const [newMessage, setNewMessage]             = useState('');
+  const [loading, setLoading]                   = useState(true);
+  const [sending, setSending]                   = useState(false);
+  const [searchQuery, setSearchQuery]           = useState('');
+  const [showSidebar, setShowSidebar]           = useState(true);
+  const [uploading, setUploading]               = useState(false);
   const [showCharacterInfo, setShowCharacterInfo] = useState(false);
 
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const router = useRouter();
+  const scrollRef           = useRef<HTMLDivElement>(null);
+  const fileInputRef        = useRef<HTMLInputElement>(null);
+  const router              = useRouter();
 
-  // ─── Data Fetching (declared before effects that use them) ───
-  const fetchConversations = async (userId: string) => {
+  // Stable refs — let realtime callbacks always see current values without stale closures
+  const userRef             = useRef<any>(null);
+  const activeConvRef       = useRef<Conversation | null>(null);
+  const msgSubRef           = useRef<any>(null);   // current messages subscription
+
+  userRef.current         = user;
+  activeConvRef.current   = activeConversation;
+
+  // ─── Fetch helpers ───────────────────────────────────────
+  const fetchConversations = useCallback(async (userId: string) => {
     const { data } = await supabase_client
       .from('project_v2_conversations')
       .select('*')
       .or(`participant_1.eq.${userId},participant_2.eq.${userId}`)
       .order('last_message_at', { ascending: false });
     if (data) setConversations(data);
-  };
+  }, []);
 
-  const fetchMessages = async (conversationId: string) => {
-    const { data } = await supabase_client
+  const fetchMessages = useCallback(async (conversationId: string) => {
+    const { data, error } = await supabase_client
       .from('project_v2_messages')
       .select('*')
       .eq('conversation_id', conversationId)
       .order('created_at', { ascending: true });
-    if (data) setMessages(data);
-  };
+    if (!error && data) setMessages(data);
+  }, []);
 
-  // Track current user ID in a ref so realtime callbacks can access it
-  const userRef = useRef<any>(null);
-  userRef.current = user;
+  // ─── Subscribe to messages for a conversation ─────────────
+  // Unsubscribes from any previous subscription first.
+  const subscribeToMessages = useCallback((conversationId: string) => {
+    // Remove old subscription cleanly
+    if (msgSubRef.current) {
+      supabase_client.removeChannel(msgSubRef.current);
+      msgSubRef.current = null;
+    }
 
-  // ─── Init Auth, Presence & Global Realtime ───
-  useEffect(() => {
-    let presenceChannel: any = null;
-    let conversationsSub: any = null;
-
-    const init = async () => {
-      const { data: { user: currentUser } } = await supabase_client.auth.getUser();
-      if (!currentUser) { router.push('/login'); return; }
-
-      const { data: prof } = await supabase_client
-        .from('project_v2_profiles')
-        .select('*')
-        .eq('id', currentUser.id)
-        .single();
-
-      if (!prof) { router.push('/profile/setup'); return; }
-
-      setUser(currentUser);
-      setProfile(prof);
-      await fetchConversations(currentUser.id);
-
-      const { data: profiles } = await supabase_client
-        .from('project_v2_profiles')
-        .select('*')
-        .neq('id', currentUser.id)
-        .order('display_name');
-      if (profiles) setAllProfiles(profiles);
-
-      // ── Presence channel ──
-      presenceChannel = supabase_client.channel('online_users', {
-        config: { presence: { key: currentUser.id } },
-      });
-
-      presenceChannel
-        .on('presence', { event: 'sync' }, () => {
-          const state = presenceChannel.presenceState();
-          const users = Object.values(state).flat() as OnlineUser[];
-          setOnlineUsers(users);
-        })
-        .subscribe(async (status: string) => {
-          if (status === 'SUBSCRIBED') {
-            await presenceChannel.track({
-              user_id: currentUser.id,
-              display_name: prof.display_name,
-              avatar_url: prof.avatar_url,
-              online_at: new Date().toISOString(),
-            });
-          }
-        });
-
-      // ── Global conversations realtime ──
-      // Refreshes sidebar when any conversation is updated (new message from anyone)
-      conversationsSub = supabase_client
-        .channel('global_conversations')
-        .on('postgres_changes', {
-          event: '*',
-          schema: 'public',
-          table: 'project_v2_conversations',
-        }, () => {
-          // Refresh conversations list when any conversation changes
-          const uid = userRef.current?.id;
-          if (uid) fetchConversations(uid);
-        })
-        .subscribe();
-
-      setLoading(false);
-    };
-
-    init();
-    return () => {
-      presenceChannel?.unsubscribe();
-      conversationsSub?.unsubscribe();
-    };
-  }, [router]);
-
-  // ─── Realtime messages for active conversation ───
-  useEffect(() => {
-    if (!activeConversation) return;
-    fetchMessages(activeConversation.id);
-
-    const sub = supabase_client
-      .channel(`messages:${activeConversation.id}`)
+    const channel = supabase_client
+      .channel(`msgs-${conversationId}`)
       .on('postgres_changes', {
         event: 'INSERT',
         schema: 'public',
         table: 'project_v2_messages',
-        filter: `conversation_id=eq.${activeConversation.id}`,
+        filter: `conversation_id=eq.${conversationId}`,
       }, (payload) => {
-        const newMsg = payload.new as Message;
-        // Deduplicate: only add if not already in messages list
+        const incoming = payload.new as Message;
         setMessages((prev) => {
-          if (prev.some((m) => m.id === newMsg.id)) return prev;
-          return [...prev, newMsg];
+          // Replace matching optimistic temp message or deduplicate
+          const hasTemp = prev.some(
+            (m) => m.id.startsWith('temp-') &&
+                   m.sender_id === incoming.sender_id &&
+                   m.content === incoming.content &&
+                   m.role === incoming.role
+          );
+          if (hasTemp) {
+            return prev.map((m) =>
+              m.id.startsWith('temp-') &&
+              m.sender_id === incoming.sender_id &&
+              m.content === incoming.content &&
+              m.role === incoming.role
+                ? incoming
+                : m
+            );
+          }
+          if (prev.some((m) => m.id === incoming.id)) return prev;
+          return [...prev, incoming];
         });
       })
-      .subscribe();
-
-    return () => { sub.unsubscribe(); };
-  }, [activeConversation]);
-
-  // ─── Auto-scroll on new messages ───
-  useEffect(() => {
-    if (scrollRef.current) {
-      // Use requestAnimationFrame to ensure DOM has updated before scrolling
-      requestAnimationFrame(() => {
-        if (scrollRef.current) {
-          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      .subscribe((status) => {
+        // If subscription fails, fall back to a full fetch
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          fetchMessages(conversationId);
         }
       });
-    }
-  }, [messages]);
 
-  // ─── Start user conversation ───
+    msgSubRef.current = channel;
+  }, [fetchMessages]);
+
+  // ─── Auth + Init ─────────────────────────────────────────
+  useEffect(() => {
+    let presenceChannel: any  = null;
+    let convChannel: any      = null;
+    let authSub: any          = null;
+    let mounted               = true;
+
+    const bootstrap = async () => {
+      try {
+        // Use getSession (local cache) — avoids network failure on init
+        const { data: { session } } = await supabase_client.auth.getSession();
+
+        if (!session?.user) {
+          router.replace('/login');
+          return;
+        }
+
+        const currentUser = session.user;
+
+        const { data: prof } = await supabase_client
+          .from('project_v2_profiles')
+          .select('*')
+          .eq('id', currentUser.id)
+          .single();
+
+        if (!prof) {
+          router.replace('/profile/setup');
+          return;
+        }
+
+        if (!mounted) return;
+
+        setUser(currentUser);
+        setProfile(prof);
+
+        await Promise.all([
+          fetchConversations(currentUser.id),
+          supabase_client
+            .from('project_v2_profiles')
+            .select('*')
+            .neq('id', currentUser.id)
+            .order('display_name')
+            .then(({ data }) => { if (data && mounted) setAllProfiles(data); }),
+        ]);
+
+        // ── Presence ──
+        presenceChannel = supabase_client.channel('online_users', {
+          config: { presence: { key: currentUser.id } },
+        });
+        presenceChannel
+          .on('presence', { event: 'sync' }, () => {
+            const state = presenceChannel.presenceState();
+            if (mounted) setOnlineUsers(Object.values(state).flat() as OnlineUser[]);
+          })
+          .subscribe(async (status: string) => {
+            if (status === 'SUBSCRIBED') {
+              await presenceChannel.track({
+                user_id: currentUser.id,
+                display_name: prof.display_name,
+                avatar_url: prof.avatar_url,
+                online_at: new Date().toISOString(),
+              });
+            }
+          });
+
+        // ── Conversations realtime (sidebar updates) ──
+        convChannel = supabase_client
+          .channel('conv-changes')
+          .on('postgres_changes', {
+            event: '*',
+            schema: 'public',
+            table: 'project_v2_conversations',
+          }, (payload) => {
+            const uid = userRef.current?.id;
+            if (!uid || !mounted) return;
+
+            // Merge updated conversation into state without full re-fetch
+            if (payload.eventType === 'UPDATE') {
+              const updated = payload.new as Conversation;
+              setConversations((prev) =>
+                prev.map((c) => c.id === updated.id ? updated : c)
+                    .sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime())
+              );
+              // Also update activeConversation if it's the one that changed
+              if (activeConvRef.current?.id === updated.id) {
+                setActiveConversation(updated);
+              }
+            } else {
+              // INSERT or DELETE — full refresh
+              fetchConversations(uid);
+            }
+          })
+          .subscribe();
+
+        // ── Auth state change handler ──
+        // Handles session expiry, token refresh, sign-out
+        const { data: { subscription } } = supabase_client.auth.onAuthStateChange(
+          (event, session) => {
+            if (!mounted) return;
+            if (event === 'SIGNED_OUT' || !session) {
+              router.replace('/login');
+            }
+          }
+        );
+        authSub = subscription;
+
+        if (mounted) setLoading(false);
+      } catch (err) {
+        console.error('Chat init error:', err);
+        // Always exit loading state even on error to prevent permanent spinner
+        if (mounted) setLoading(false);
+      }
+    };
+
+    bootstrap();
+
+    return () => {
+      mounted = false;
+      presenceChannel?.unsubscribe();
+      convChannel && supabase_client.removeChannel(convChannel);
+      authSub?.unsubscribe();
+      if (msgSubRef.current) {
+        supabase_client.removeChannel(msgSubRef.current);
+        msgSubRef.current = null;
+      }
+    };
+  }, [router, fetchConversations]);
+
+  // ─── Switch active conversation ───────────────────────────
+  // When user taps a conversation in sidebar: load messages + subscribe
+  const openConversation = useCallback((conv: Conversation, character: AICharacter | null) => {
+    setActiveConversation(conv);
+    setActiveCharacter(character);
+    setShowSidebar(false);
+    setShowCharacterInfo(false);
+    setMessages([]); // Clear immediately so old messages don't flash
+
+    // Load messages and start realtime subscription
+    fetchMessages(conv.id);
+    subscribeToMessages(conv.id);
+  }, [fetchMessages, subscribeToMessages]);
+
+  // ─── Auto-scroll ──────────────────────────────────────────
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
+    });
+  }, [messages, sending]);
+
+  // ─── Start user-to-user conversation ─────────────────────
   const startConversation = async (otherUserId: string) => {
     if (!user) return;
-    const { data: existing } = await supabase_client
+
+    // Check for existing conversation
+    const { data: rows } = await supabase_client
       .from('project_v2_conversations')
       .select('*')
-      .or(`and(participant_1.eq.${user.id},participant_2.eq.${otherUserId}),and(participant_1.eq.${otherUserId},participant_2.eq.${user.id})`)
-      .limit(1)
-      .single();
+      .or(
+        `and(participant_1.eq.${user.id},participant_2.eq.${otherUserId}),` +
+        `and(participant_1.eq.${otherUserId},participant_2.eq.${user.id})`
+      )
+      .limit(1);
 
-    if (existing) {
-      setActiveConversation(existing);
-      setActiveCharacter(null);
-      setShowSidebar(false);
-      return;
-    }
+    const existing = rows?.[0];
+    if (existing) { openConversation(existing, null); return; }
 
     const { data: conv } = await supabase_client
       .from('project_v2_conversations')
       .insert({ participant_1: user.id, participant_2: otherUserId })
-      .select().single();
+      .select()
+      .single();
 
     if (conv) {
       setConversations((prev) => [conv, ...prev]);
-      setActiveConversation(conv);
-      setActiveCharacter(null);
-      setShowSidebar(false);
+      openConversation(conv, null);
     }
   };
 
-  // ─── Start AI character conversation ───
+  // ─── Start AI character conversation ─────────────────────
   const startCharacterConversation = async (character: AICharacter) => {
     if (!user) return;
-    const { data: existing } = await supabase_client
+
+    const { data: rows } = await supabase_client
       .from('project_v2_conversations')
       .select('*')
       .eq('participant_1', user.id)
       .eq('bot_id', character.id)
-      .limit(1)
-      .single();
+      .limit(1);
 
-    if (existing) {
-      setActiveConversation(existing);
-      setActiveCharacter(character);
-      setShowSidebar(false);
-      return;
-    }
+    const existing = rows?.[0];
+    if (existing) { openConversation(existing, character); return; }
 
     const { data: conv } = await supabase_client
       .from('project_v2_conversations')
       .insert({ participant_1: user.id, bot_id: character.id })
-      .select().single();
+      .select()
+      .single();
 
     if (conv) {
       setConversations((prev) => [conv, ...prev]);
-      setActiveConversation(conv);
-      setActiveCharacter(character);
-      setShowSidebar(false);
+      openConversation(conv, character);
     }
   };
 
-  // ─── Send Message ───
+  // ─── Send Message ─────────────────────────────────────────
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newMessage.trim() || !activeConversation || !user || sending) return;
@@ -305,10 +383,10 @@ export default function ChatPage() {
     const content = newMessage.trim();
     setNewMessage('');
 
-    // Optimistic: show user message immediately before DB confirms
-    const optimisticId = `temp-${Date.now()}`;
-    const optimisticMsg: Message = {
-      id: optimisticId,
+    // Optimistic UI — show immediately
+    const tempId = `temp-${Date.now()}`;
+    const optimistic: Message = {
+      id: tempId,
       conversation_id: activeConversation.id,
       sender_id: user.id,
       role: 'user',
@@ -319,35 +397,44 @@ export default function ChatPage() {
       media_size: null,
       created_at: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, optimisticMsg]);
+    setMessages((prev) => [...prev, optimistic]);
 
-    // Insert to DB (realtime will push back confirmed msg and dedup will handle it)
-    const { data: insertedMsg } = await supabase_client.from('project_v2_messages').insert({
-      conversation_id: activeConversation.id,
-      sender_id: user.id,
-      role: 'user',
-      content,
-      message_type: 'text',
-    }).select().single();
+    // Persist to DB — realtime will push back confirmed row
+    // (subscribeToMessages dedup will swap the temp entry)
+    const { error: insertErr } = await supabase_client
+      .from('project_v2_messages')
+      .insert({
+        conversation_id: activeConversation.id,
+        sender_id: user.id,
+        role: 'user',
+        content,
+        message_type: 'text',
+      });
 
-    // Replace optimistic message with confirmed one
-    if (insertedMsg) {
-      setMessages((prev) => prev.map((m) => m.id === optimisticId ? insertedMsg : m));
+    if (insertErr) {
+      console.error('Message insert error:', insertErr);
+      // Roll back optimistic message on failure
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+      return;
     }
 
+    // AI response
     if (activeCharacter) {
       setSending(true);
       try {
-        const recentMessages = messages.slice(-100);
+        const history = messages
+          .filter((m) => !m.id.startsWith('temp-'))
+          .slice(-100)
+          .map((m) => ({ role: m.role, content: m.content }));
+
         const res = await fetch('/api/chat/ai', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            characterId: activeCharacter.id,
-            message: content,
-            history: recentMessages.map((m) => ({ role: m.role, content: m.content })),
-          }),
+          body: JSON.stringify({ characterId: activeCharacter.id, message: content, history }),
         });
+
+        if (!res.ok) throw new Error(`AI API ${res.status}`);
+
         const data = await res.json();
         if (data.response) {
           await supabase_client.from('project_v2_messages').insert({
@@ -357,20 +444,16 @@ export default function ChatPage() {
             content: data.response,
             message_type: 'text',
           });
-        } else if (data.error) {
-          console.error('AI error:', data.error);
         }
       } catch (err) {
-        console.error('AI fetch error:', err);
+        console.error('AI error:', err);
       } finally {
         setSending(false);
       }
     }
-
-    fetchConversations(user.id);
   };
 
-  // ─── File upload ───
+  // ─── File Upload ──────────────────────────────────────────
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !activeConversation || !user) return;
@@ -400,47 +483,47 @@ export default function ChatPage() {
     });
 
     setUploading(false);
-    if (user) fetchConversations(user.id);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // ─── Helpers ───
+  // ─── Helpers ──────────────────────────────────────────────
   const getOtherProfile = useCallback((conv: Conversation): Profile | undefined => {
     if (!user) return undefined;
     const otherId = conv.participant_1 === user.id ? conv.participant_2 : conv.participant_1;
     return allProfiles.find((p) => p.id === otherId);
   }, [user, allProfiles]);
 
-  const getCharacterForConv = (conv: Conversation): AICharacter | undefined => {
-    return conv.bot_id ? CHARACTER_MAP[conv.bot_id] : undefined;
-  };
+  const getCharacterForConv = (conv: Conversation) =>
+    conv.bot_id ? CHARACTER_MAP[conv.bot_id] : undefined;
 
-  const isUserOnline = (userId: string) => onlineUsers.some((u) => u.user_id === userId);
+  const isUserOnline = (uid: string) => onlineUsers.some((u) => u.user_id === uid);
 
   const handleLogout = async () => {
     await supabase_client.auth.signOut();
-    router.push('/login');
+    router.replace('/login');
   };
 
-  // Filter contacts
+  // ─── Filtered sidebar lists ───────────────────────────────
   const filteredProfiles = allProfiles.filter((p) =>
     p.display_name.toLowerCase().includes(searchQuery.toLowerCase())
   );
   const onlineProfileIds = new Set(onlineUsers.map((u) => u.user_id));
-  const conversationPartnerIds = new Set(
-    conversations.filter((c) => !c.bot_id)
-      .map((c) => c.participant_1 === user?.id ? c.participant_2 : c.participant_1)
+  const convPartnerIds = new Set(
+    conversations
+      .filter((c) => !c.bot_id)
+      .map((c) => (c.participant_1 === user?.id ? c.participant_2 : c.participant_1))
       .filter(Boolean) as string[]
   );
-  const onlineProfiles = filteredProfiles.filter((p) => onlineProfileIds.has(p.id));
-  const pastConvProfiles = filteredProfiles.filter((p) => conversationPartnerIds.has(p.id) && !onlineProfileIds.has(p.id));
-  const otherProfiles = filteredProfiles.filter((p) => !onlineProfileIds.has(p.id) && !conversationPartnerIds.has(p.id));
-
-  // Filter characters by search
+  const onlineProfiles   = filteredProfiles.filter((p) => onlineProfileIds.has(p.id));
+  const pastConvProfiles = filteredProfiles.filter((p) => convPartnerIds.has(p.id) && !onlineProfileIds.has(p.id));
+  const otherProfiles    = filteredProfiles.filter((p) => !onlineProfileIds.has(p.id) && !convPartnerIds.has(p.id));
   const filteredCharacters = searchQuery
-    ? AI_CHARACTERS.filter((c) => c.name.toLowerCase().includes(searchQuery.toLowerCase()) || c.role.toLowerCase().includes(searchQuery.toLowerCase()))
+    ? AI_CHARACTERS.filter((c) =>
+        c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        c.role.toLowerCase().includes(searchQuery.toLowerCase()))
     : AI_CHARACTERS;
 
+  // ─── Loading screen ───────────────────────────────────────
   if (loading) {
     return (
       <div className="min-h-screen bg-[#09090b] flex items-center justify-center">
@@ -449,31 +532,40 @@ export default function ChatPage() {
     );
   }
 
-  // ─── Chat header info ───
+  // ─── Chat header values ───────────────────────────────────
   const chatHeaderName = activeCharacter
     ? activeCharacter.name
-    : activeConversation ? getOtherProfile(activeConversation)?.display_name || 'User' : '';
+    : activeConversation
+      ? getOtherProfile(activeConversation)?.display_name || 'User'
+      : '';
+
+  const chatPartnerOnline = activeConversation && !activeCharacter
+    ? isUserOnline(
+        activeConversation.participant_1 === user?.id
+          ? activeConversation.participant_2!
+          : activeConversation.participant_1
+      )
+    : false;
 
   const chatHeaderSub = activeCharacter
     ? activeCharacter.role
-    : activeConversation && !activeCharacter
-      ? (isUserOnline(activeConversation.participant_1 === user?.id ? activeConversation.participant_2! : activeConversation.participant_1) ? 'Online' : 'Offline')
-      : '';
+    : chatPartnerOnline ? 'Online' : 'Offline';
 
+  // ─── Render ───────────────────────────────────────────────
   return (
     <main className="flex h-screen bg-[#09090b] text-white overflow-hidden">
-      {/* ═══════ SIDEBAR ═══════ */}
+
+      {/* ══════════════ SIDEBAR ══════════════ */}
       <aside className={`${showSidebar ? 'flex' : 'hidden md:flex'} w-full md:w-[380px] flex-col border-r border-white/[0.06] bg-[#0f0f12]`}>
-        {/* Header */}
+
+        {/* Sidebar header */}
         <div className="p-4 border-b border-white/[0.06]">
           <div className="flex items-center justify-between mb-4">
             <button onClick={() => router.push('/profile')} className="flex items-center gap-3 hover:opacity-80 transition-opacity">
               <div className="w-10 h-10 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center">
-                {profile?.avatar_url ? (
-                  <img src={profile.avatar_url} alt="" className="w-full h-full object-cover" />
-                ) : (
-                  <User className="w-5 h-5 text-white/40" />
-                )}
+                {profile?.avatar_url
+                  ? <img src={profile.avatar_url} alt="" className="w-full h-full object-cover" />
+                  : <User className="w-5 h-5 text-white/40" />}
               </div>
               <div className="text-left">
                 <p className="font-semibold text-sm">{profile?.display_name}</p>
@@ -501,18 +593,16 @@ export default function ChatPage() {
           </div>
         </div>
 
-        {/* Body */}
+        {/* Sidebar body */}
         <div className="flex-1 overflow-y-auto custom-scrollbar">
+
           {/* AI Characters */}
           <div className="px-4 pt-4 pb-2">
             <p className="text-xs font-semibold text-white/30 uppercase tracking-wider mb-3">AI Characters</p>
             <div className="flex gap-3 overflow-x-auto pb-2 custom-scrollbar">
               {filteredCharacters.map((c) => (
-                <button
-                  key={c.id}
-                  onClick={() => startCharacterConversation(c)}
-                  className="flex flex-col items-center gap-1.5 min-w-[60px] group"
-                >
+                <button key={c.id} onClick={() => startCharacterConversation(c)}
+                  className="flex flex-col items-center gap-1.5 min-w-[60px] group">
                   <div className={`w-12 h-12 rounded-full ${c.color} flex items-center justify-center text-lg shadow-lg group-hover:scale-110 transition-transform`}>
                     {c.avatar}
                   </div>
@@ -529,36 +619,27 @@ export default function ChatPage() {
             <div className="px-2 pt-3">
               <p className="text-xs font-semibold text-white/30 uppercase tracking-wider mb-2 px-2">Recent Chats</p>
               {conversations.map((conv) => {
-                const character = getCharacterForConv(conv);
-                const otherProfile = !character ? getOtherProfile(conv) : null;
-                const name = character ? character.name : otherProfile?.display_name || 'User';
-                const avatarUrl = otherProfile?.avatar_url;
-                const isOnline = !character && otherProfile ? isUserOnline(otherProfile.id) : !!character;
-                const isActive = activeConversation?.id === conv.id;
+                const character   = getCharacterForConv(conv);
+                const otherProf   = !character ? getOtherProfile(conv) : null;
+                const name        = character ? character.name : otherProf?.display_name || 'User';
+                const avatarUrl   = otherProf?.avatar_url;
+                const online      = !character && otherProf ? isUserOnline(otherProf.id) : !!character;
+                const isActive    = activeConversation?.id === conv.id;
 
                 return (
-                  <button
-                    key={conv.id}
-                    onClick={() => {
-                      setActiveConversation(conv);
-                      setActiveCharacter(character || null);
-                      setMessages([]);
-                      setShowSidebar(false);
-                      setShowCharacterInfo(false);
-                    }}
+                  <button key={conv.id}
+                    onClick={() => openConversation(conv, character || null)}
                     className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors ${isActive ? 'bg-emerald-500/10' : 'hover:bg-white/[0.04]'}`}
                   >
                     <div className="relative flex-shrink-0">
                       <div className="w-12 h-12 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center">
-                        {character ? (
-                          <span className="text-xl">{character.avatar}</span>
-                        ) : avatarUrl ? (
-                          <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
-                        ) : (
-                          <User className="w-5 h-5 text-white/30" />
-                        )}
+                        {character
+                          ? <span className="text-xl">{character.avatar}</span>
+                          : avatarUrl
+                            ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
+                            : <User className="w-5 h-5 text-white/30" />}
                       </div>
-                      {isOnline && (
+                      {online && (
                         <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-[#0f0f12] flex items-center justify-center">
                           <div className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
                         </div>
@@ -590,7 +671,8 @@ export default function ChatPage() {
                 Online Now <span className="text-emerald-400">({onlineProfiles.length})</span>
               </p>
               {onlineProfiles.map((p) => (
-                <button key={p.id} onClick={() => startConversation(p.id)} className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-white/[0.04] transition-colors">
+                <button key={p.id} onClick={() => startConversation(p.id)}
+                  className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-white/[0.04] transition-colors">
                   <div className="relative flex-shrink-0">
                     <div className="w-10 h-10 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center">
                       {p.avatar_url ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" /> : <User className="w-4 h-4 text-white/30" />}
@@ -608,12 +690,13 @@ export default function ChatPage() {
             </div>
           )}
 
-          {/* Past + Discover */}
+          {/* Past Conversations */}
           {pastConvProfiles.length > 0 && (
             <div className="px-2 pt-2">
               <p className="text-xs font-semibold text-white/30 uppercase tracking-wider mb-2 px-2">Past Conversations</p>
               {pastConvProfiles.map((p) => (
-                <button key={p.id} onClick={() => startConversation(p.id)} className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-white/[0.04] transition-colors">
+                <button key={p.id} onClick={() => startConversation(p.id)}
+                  className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-white/[0.04] transition-colors">
                   <div className="w-10 h-10 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center flex-shrink-0">
                     {p.avatar_url ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" /> : <User className="w-4 h-4 text-white/30" />}
                   </div>
@@ -626,11 +709,13 @@ export default function ChatPage() {
             </div>
           )}
 
+          {/* Discover People */}
           {otherProfiles.length > 0 && (
             <div className="px-2 pt-2 pb-4">
               <p className="text-xs font-semibold text-white/30 uppercase tracking-wider mb-2 px-2">Discover People</p>
               {otherProfiles.map((p) => (
-                <button key={p.id} onClick={() => startConversation(p.id)} className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-white/[0.04] transition-colors">
+                <button key={p.id} onClick={() => startConversation(p.id)}
+                  className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-white/[0.04] transition-colors">
                   <div className="w-10 h-10 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center flex-shrink-0">
                     {p.avatar_url ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" /> : <User className="w-4 h-4 text-white/30" />}
                   </div>
@@ -645,45 +730,43 @@ export default function ChatPage() {
         </div>
       </aside>
 
-      {/* ═══════ CHAT AREA ═══════ */}
-      <div className={`${!showSidebar ? 'flex' : 'hidden md:flex'} flex-1 flex-col`}>
+      {/* ══════════════ CHAT AREA ══════════════ */}
+      <div className={`${!showSidebar ? 'flex' : 'hidden md:flex'} flex-1 flex-col min-w-0`}>
         {activeConversation ? (
           <>
             {/* Chat Header */}
-            <div className="border-b border-white/[0.06] bg-[#0f0f12]">
+            <div className="border-b border-white/[0.06] bg-[#0f0f12] flex-shrink-0">
               <div className="h-16 flex items-center justify-between px-4">
-                <div className="flex items-center gap-3">
-                  <button className="md:hidden p-1.5 rounded-lg hover:bg-white/[0.06] mr-1" onClick={() => setShowSidebar(true)}>
+                <div className="flex items-center gap-3 min-w-0">
+                  <button className="md:hidden p-1.5 rounded-lg hover:bg-white/[0.06] mr-1 flex-shrink-0"
+                    onClick={() => setShowSidebar(true)}>
                     <ArrowLeft className="w-5 h-5" />
                   </button>
                   <button
                     onClick={() => activeCharacter && setShowCharacterInfo(!showCharacterInfo)}
-                    className="flex items-center gap-3"
+                    className="flex items-center gap-3 min-w-0"
                   >
-                    <div className={`w-10 h-10 rounded-full overflow-hidden flex items-center justify-center ${activeCharacter ? `bg-gradient-to-br ${activeCharacter.gradient}` : 'bg-white/[0.08]'}`}>
-                      {activeCharacter ? (
-                        <span className="text-xl">{activeCharacter.avatar}</span>
-                      ) : (getOtherProfile(activeConversation)?.avatar_url ? (
-                        <img src={getOtherProfile(activeConversation)!.avatar_url} alt="" className="w-full h-full object-cover" />
-                      ) : (
-                        <User className="w-5 h-5 text-white/30" />
-                      ))}
+                    <div className={`w-10 h-10 rounded-full overflow-hidden flex items-center justify-center flex-shrink-0 ${activeCharacter ? `bg-gradient-to-br ${activeCharacter.gradient}` : 'bg-white/[0.08]'}`}>
+                      {activeCharacter
+                        ? <span className="text-xl">{activeCharacter.avatar}</span>
+                        : getOtherProfile(activeConversation)?.avatar_url
+                          ? <img src={getOtherProfile(activeConversation)!.avatar_url} alt="" className="w-full h-full object-cover" />
+                          : <User className="w-5 h-5 text-white/30" />}
                     </div>
-                    <div className="text-left">
-                      <p className="font-semibold text-sm">{chatHeaderName}</p>
+                    <div className="text-left min-w-0">
+                      <p className="font-semibold text-sm truncate">{chatHeaderName}</p>
                       <p className={`text-xs ${chatHeaderSub === 'Online' || activeCharacter ? 'text-emerald-400' : 'text-white/30'}`}>
                         {chatHeaderSub}
                       </p>
                     </div>
                   </button>
                 </div>
-                {/* Music player for AI chats */}
                 {activeCharacter && (
                   <MusicPlayer mood={activeCharacter.musicMood} accentColor={activeCharacter.accentColor} />
                 )}
               </div>
 
-              {/* Character Info Panel (expandable) */}
+              {/* Character Info Panel */}
               <AnimatePresence>
                 {showCharacterInfo && activeCharacter && (
                   <motion.div
@@ -711,7 +794,7 @@ export default function ChatPage() {
                           </div>
                           <p className="text-[10px] text-white/20 mt-2 italic">&ldquo;{activeCharacter.motto}&rdquo;</p>
                         </div>
-                        <button onClick={() => setShowCharacterInfo(false)} className="p-1 rounded-lg hover:bg-white/[0.06] text-white/30">
+                        <button onClick={() => setShowCharacterInfo(false)} className="p-1 rounded-lg hover:bg-white/[0.06] text-white/30 flex-shrink-0">
                           <X className="w-4 h-4" />
                         </button>
                       </div>
@@ -722,13 +805,20 @@ export default function ChatPage() {
             </div>
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto px-4 md:px-16 py-6 space-y-1 custom-scrollbar bg-[#09090b]" ref={scrollRef}>
-              {messages.length === 0 && (
+            <div
+              ref={scrollRef}
+              className="flex-1 overflow-y-auto px-4 md:px-16 py-6 space-y-1 custom-scrollbar bg-[#09090b]"
+            >
+              {messages.length === 0 && !sending && (
                 <div className="flex flex-col items-center justify-center h-full text-center">
                   <div className={`w-20 h-20 rounded-2xl flex items-center justify-center mb-4 ${activeCharacter ? `bg-gradient-to-br ${activeCharacter.gradient}` : 'bg-white/[0.06]'}`}>
-                    {activeCharacter ? <span className="text-4xl">{activeCharacter.avatar}</span> : <MessageCircle className="w-8 h-8 text-white/20" />}
+                    {activeCharacter
+                      ? <span className="text-4xl">{activeCharacter.avatar}</span>
+                      : <MessageCircle className="w-8 h-8 text-white/20" />}
                   </div>
-                  <p className="font-semibold text-lg mb-1">{activeCharacter ? activeCharacter.name : 'Start chatting'}</p>
+                  <p className="font-semibold text-lg mb-1">
+                    {activeCharacter ? activeCharacter.name : 'Start chatting'}
+                  </p>
                   <p className="text-white/30 text-sm max-w-xs">
                     {activeCharacter ? activeCharacter.motto : 'Send a message to start the conversation.'}
                   </p>
@@ -740,12 +830,12 @@ export default function ChatPage() {
 
               <AnimatePresence initial={false}>
                 {messages.map((m, idx) => {
-                  const isMe = m.role === 'user' && m.sender_id === user?.id;
-                  const isAssistant = m.role === 'assistant';
-                  const fromMe = isMe && !isAssistant;
+                  const fromMe = m.role === 'user' && m.sender_id === user?.id;
+                  const isTemp = m.id.startsWith('temp-');
 
                   const showDateSep = idx === 0 || (
-                    new Date(messages[idx - 1].created_at).toDateString() !== new Date(m.created_at).toDateString()
+                    new Date(messages[idx - 1].created_at).toDateString() !==
+                    new Date(m.created_at).toDateString()
                   );
 
                   return (
@@ -758,14 +848,13 @@ export default function ChatPage() {
                         </div>
                       )}
                       <motion.div
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: isTemp ? 0.7 : 1, y: 0 }}
+                        transition={{ duration: 0.15 }}
                         className={`flex ${fromMe ? 'justify-end' : 'justify-start'} mb-1`}
                       >
-                        <div className={`max-w-[75%] md:max-w-[60%]`}>
-                          <div className={`px-3.5 py-2 rounded-2xl ${
-                            fromMe ? 'bg-emerald-600 rounded-tr-md' : 'bg-white/[0.08] rounded-tl-md'
-                          }`}>
+                        <div className="max-w-[75%] md:max-w-[60%]">
+                          <div className={`px-3.5 py-2 rounded-2xl ${fromMe ? 'bg-emerald-600 rounded-tr-md' : 'bg-white/[0.08] rounded-tl-md'}`}>
                             {m.message_type === 'image' && m.media_url && (
                               <img src={m.media_url} alt="Shared image" className="rounded-xl max-w-full max-h-64 object-cover mb-1" />
                             )}
@@ -776,7 +865,8 @@ export default function ChatPage() {
                               <audio src={m.media_url} controls className="max-w-full mb-1" />
                             )}
                             {m.message_type === 'document' && m.media_url && (
-                              <a href={m.media_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 p-2 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] transition-colors mb-1">
+                              <a href={m.media_url} target="_blank" rel="noopener noreferrer"
+                                className="flex items-center gap-2 p-2 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] transition-colors mb-1">
                                 <FileText className="w-5 h-5 text-emerald-400 flex-shrink-0" />
                                 <div className="min-w-0">
                                   <p className="text-sm font-medium truncate">{m.media_name || 'Document'}</p>
@@ -784,10 +874,16 @@ export default function ChatPage() {
                                 </div>
                               </a>
                             )}
-                            {m.content && <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{m.content}</p>}
+                            {m.content && (
+                              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{m.content}</p>
+                            )}
                             <div className={`flex items-center gap-1 mt-1 ${fromMe ? 'justify-end' : 'justify-start'}`}>
                               <span className="text-[10px] text-white/20">{formatTime(m.created_at)}</span>
-                              {fromMe && <CheckCheck className="w-3.5 h-3.5 text-white/20" />}
+                              {fromMe && (
+                                isTemp
+                                  ? <Loader2 className="w-3 h-3 text-white/20 animate-spin" />
+                                  : <CheckCheck className="w-3.5 h-3.5 text-white/30" />
+                              )}
                             </div>
                           </div>
                         </div>
@@ -797,61 +893,73 @@ export default function ChatPage() {
                 })}
               </AnimatePresence>
 
+              {/* AI typing indicator */}
               {sending && (
-                <div className="flex justify-start mb-1">
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="flex justify-start mb-1"
+                >
                   <div className="bg-white/[0.08] rounded-2xl rounded-tl-md px-4 py-3">
-                    <div className="flex gap-1.5">
-                      <div className="w-2 h-2 rounded-full bg-white/20 animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <div className="w-2 h-2 rounded-full bg-white/20 animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <div className="w-2 h-2 rounded-full bg-white/20 animate-bounce" style={{ animationDelay: '300ms' }} />
+                    <div className="flex gap-1.5 items-center">
+                      <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '0ms' }} />
+                      <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '150ms' }} />
+                      <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '300ms' }} />
                     </div>
                   </div>
-                </div>
+                </motion.div>
               )}
             </div>
 
             {/* Input */}
-            <div className="p-3 border-t border-white/[0.06] bg-[#0f0f12]">
+            <div className="p-3 border-t border-white/[0.06] bg-[#0f0f12] flex-shrink-0">
               {uploading && (
                 <div className="flex items-center gap-2 text-xs text-white/40 mb-2 px-2">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" /> Uploading file...
                 </div>
               )}
-              <form onSubmit={sendMessage} className="flex items-end gap-2">
-                <button type="button" onClick={() => fileInputRef.current?.click()} className="p-2.5 rounded-xl hover:bg-white/[0.06] text-white/40 hover:text-white transition-colors flex-shrink-0" title="Attach file">
+              <form onSubmit={sendMessage} className="flex items-center gap-2">
+                <button type="button" onClick={() => fileInputRef.current?.click()}
+                  className="p-2.5 rounded-xl hover:bg-white/[0.06] text-white/40 hover:text-white transition-colors flex-shrink-0"
+                  title="Attach file">
                   <Paperclip className="w-5 h-5" />
                 </button>
-                <input ref={fileInputRef} type="file" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv" onChange={handleFileUpload} className="hidden" />
-                <div className="flex-1">
-                  <input
-                    value={newMessage}
-                    onChange={(e) => setNewMessage(e.target.value)}
-                    placeholder="Type a message"
-                    className="w-full bg-white/[0.06] border border-white/[0.08] rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/30 transition-colors placeholder:text-white/20"
-                  />
-                </div>
-                <button type="submit" disabled={!newMessage.trim() || sending} className="p-2.5 rounded-xl bg-emerald-500 text-black hover:bg-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0">
+                <input ref={fileInputRef} type="file"
+                  accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv"
+                  onChange={handleFileUpload} className="hidden" />
+                <input
+                  value={newMessage}
+                  onChange={(e) => setNewMessage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      sendMessage(e as any);
+                    }
+                  }}
+                  placeholder="Type a message"
+                  className="flex-1 bg-white/[0.06] border border-white/[0.08] rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/30 transition-colors placeholder:text-white/20"
+                />
+                <button type="submit" disabled={!newMessage.trim() || sending}
+                  className="p-2.5 rounded-xl bg-emerald-500 text-black hover:bg-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0">
                   <Send className="w-5 h-5" />
                 </button>
               </form>
             </div>
           </>
         ) : (
+          /* Empty state */
           <div className="flex-1 flex flex-col items-center justify-center bg-[#09090b]">
             <div className="w-20 h-20 rounded-3xl bg-white/[0.04] border border-white/[0.06] flex items-center justify-center mb-6">
               <MessageCircle className="w-10 h-10 text-white/10" />
             </div>
             <h2 className="text-xl font-semibold text-white/30 mb-2">Your messages</h2>
             <p className="text-sm text-white/20 max-w-sm text-center mb-6">
-              Select a conversation from the sidebar, pick an AI character, or click on any user to start chatting.
+              Select a conversation, pick an AI character, or click on a user to start chatting.
             </p>
             <div className="flex flex-wrap gap-3 justify-center">
               {AI_CHARACTERS.slice(0, 3).map((c) => (
-                <button
-                  key={c.id}
-                  onClick={() => startCharacterConversation(c)}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/[0.04] border border-white/[0.06] hover:bg-white/[0.08] transition-colors"
-                >
+                <button key={c.id} onClick={() => startCharacterConversation(c)}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/[0.04] border border-white/[0.06] hover:bg-white/[0.08] transition-colors">
                   <span className="text-lg">{c.avatar}</span>
                   <span className="text-sm text-white/50">Chat with {c.name}</span>
                 </button>
