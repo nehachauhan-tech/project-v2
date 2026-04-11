@@ -1,4 +1,4 @@
-import { GoogleGenAI, type HarmCategory, type HarmBlockThreshold, type ThinkingLevel } from '@google/genai';
+import { GoogleGenAI, type HarmCategory, type HarmBlockThreshold, ThinkingLevel } from '@google/genai';
 import { NextResponse } from 'next/server';
 import { CHARACTER_MAP } from '@/data/characters';
 
@@ -6,12 +6,18 @@ const ai = new GoogleGenAI({
   apiKey: process.env.GOOGLE_CLOUD_API_KEY!,
 });
 
-// Only Gemini 3.x preview models support thinking config
-const THINKING_MODELS = new Set([
-  'gemini-3-flash-preview',
-  'gemini-3.1-pro-preview',
-  'gemini-3.1-flash-lite-preview',
-]);
+// Single model for all roleplay characters
+const CHAT_MODEL = 'gemini-3-flash-preview';
+
+const moodContext = `
+MOOD SYSTEM: You must respond according to the emotional tone of the user's message.
+- If the user seems sad or stressed, respond with empathy and comfort (like a real human friend would).
+- If the user is happy or excited, match their energy and celebrate with them.
+- If the user is curious, engage their curiosity with enthusiasm.
+- If the user is angry or frustrated, acknowledge their feelings before responding.
+- If the user is flirting or being romantic, respond naturally in character (stay appropriate).
+- Always feel like a REAL PERSON chatting, never robotic or AI-like.
+`;
 
 export async function POST(req: Request) {
   try {
@@ -22,21 +28,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Invalid character ID' }, { status: 400 });
     }
 
-    const modelId = character.model;
-
-    const moodContext = `
-MOOD SYSTEM: You must respond according to the emotional tone of the user's message.
-- If the user seems sad or stressed, respond with empathy and comfort (like a real human friend would).
-- If the user is happy or excited, match their energy and celebrate with them.
-- If the user is curious, engage their curiosity with enthusiasm.
-- If the user is angry or frustrated, acknowledge their feelings before responding.
-- If the user is flirting or being romantic, respond naturally in character (stay appropriate).
-- Always feel like a REAL PERSON chatting, never robotic or AI-like.
-`;
-
     const systemInstruction = character.systemPrompt + '\n\n' + moodContext;
 
-    const generationConfig: Record<string, any> = {
+    // Build conversation history in the format expected by the API
+    const formattedHistory = (history || []).map((h: any) => ({
+      role: h.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: h.content }],
+    }));
+
+    // Append the new user message
+    const contents = [
+      ...formattedHistory,
+      {
+        role: 'user',
+        parts: [{ text: message }],
+      },
+    ];
+
+    const config = {
+      thinkingConfig: {
+        thinkingLevel: ThinkingLevel.HIGH,
+      },
       maxOutputTokens: 4096,
       temperature: 1,
       topP: 0.95,
@@ -46,39 +58,29 @@ MOOD SYSTEM: You must respond according to the emotional tone of the user's mess
         { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT' as HarmCategory, threshold: 'OFF' as HarmBlockThreshold },
         { category: 'HARM_CATEGORY_HARASSMENT' as HarmCategory, threshold: 'OFF' as HarmBlockThreshold },
       ],
-      tools: [{ googleSearch: {} }],
       systemInstruction: {
         parts: [{ text: systemInstruction }],
       },
     };
 
-    // Only add thinking config for models that support it
-    if (THINKING_MODELS.has(modelId)) {
-      generationConfig.thinkingConfig = {
-        thinkingLevel: 'HIGH' as ThinkingLevel,
-      };
+    // Use generateContentStream as shown in the official example
+    const response = await ai.models.generateContentStream({
+      model: CHAT_MODEL,
+      config,
+      contents,
+    });
+
+    // Collect all streamed chunks into a single response text
+    let responseText = '';
+    for await (const chunk of response) {
+      if (chunk.text) {
+        responseText += chunk.text;
+      }
     }
-
-    const formattedHistory = (history || []).map((h: any) => ({
-      role: h.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: h.content }],
-    }));
-
-    const chat = ai.chats.create({
-      model: modelId,
-      config: generationConfig,
-      history: formattedHistory,
-    });
-
-    const result = await chat.sendMessage({
-      message: message,
-    });
-
-    const responseText = result.text ?? '';
 
     return NextResponse.json({
       response: responseText,
-      model: modelId,
+      model: CHAT_MODEL,
       character: character.name,
       characterId: character.id,
     });

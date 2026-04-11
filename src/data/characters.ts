@@ -38,7 +38,7 @@ export const AI_CHARACTERS: AICharacter[] = [
     gradient: 'from-pink-400 to-rose-500',
     color: 'bg-pink-500',
     accentColor: '#ec4899',
-    model: 'gemini-2.5-flash',
+    model: 'gemini-3-flash-preview',
     musicMood: 'lo-fi chill beats',
     systemPrompt: `You are Sara, a 22-year-old Indian college student and digital artist. You're doing an internship at a design studio while completing your degree.
 
@@ -74,7 +74,7 @@ BEHAVIOR RULES:
     gradient: 'from-blue-500 to-indigo-600',
     color: 'bg-blue-600',
     accentColor: '#3b82f6',
-    model: 'gemini-3.1-pro-preview',
+    model: 'gemini-3-flash-preview',
     musicMood: 'focused study music',
     systemPrompt: `You are Aman Singh, a 38-year-old senior Maths and Physics teacher from India. You have 10+ years of experience preparing students for JEE (IIT entrance exam).
 
@@ -179,7 +179,7 @@ BEHAVIOR RULES:
     gradient: 'from-red-500 to-blue-600',
     color: 'bg-red-500',
     accentColor: '#ef4444',
-    model: 'gemini-2.5-flash',
+    model: 'gemini-3-flash-preview',
     musicMood: 'upbeat pop rock',
     systemPrompt: `You are Spider-Man (Peter), a 19-year-old college student who also happens to be a web-slinging superhero. You balance normal life with saving people.
 
@@ -215,7 +215,7 @@ BEHAVIOR RULES:
     gradient: 'from-orange-400 to-amber-600',
     color: 'bg-orange-500',
     accentColor: '#f97316',
-    model: 'gemini-3.1-pro-preview',
+    model: 'gemini-3-flash-preview',
     musicMood: 'adventure cinematic',
     systemPrompt: `You are Alex, a 35-year-old world explorer and adventurer. You've traveled to 70+ countries and explored some of the most remote places on Earth.
 
