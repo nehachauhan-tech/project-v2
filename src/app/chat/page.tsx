@@ -338,7 +338,7 @@ export default function ChatPage() {
     if (activeCharacter) {
       setSending(true);
       try {
-        const recentMessages = messages.slice(-10);
+        const recentMessages = messages.slice(-100);
         const res = await fetch('/api/chat/ai', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
