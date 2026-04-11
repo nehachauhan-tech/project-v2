@@ -6,7 +6,7 @@ import {
   Send, Search, LogOut, User,
   Paperclip, FileText,
   MessageCircle, ArrowLeft, Loader2, CheckCheck,
-  X, Volume2, VolumeX, Settings,
+  X, Volume2, VolumeX, Settings, Mic, MicOff, Headphones,
 } from 'lucide-react';
 import { supabase_client } from '@/lib/supabase_client';
 import { useRouter } from 'next/navigation';
@@ -87,9 +87,14 @@ export default function ChatPage() {
   const [showSidebar, setShowSidebar]           = useState(true);
   const [uploading, setUploading]               = useState(false);
   const [showCharacterInfo, setShowCharacterInfo] = useState(false);
+  const [voiceMode, setVoiceMode]               = useState(false);   // AI replies as voice
+  const [recording, setRecording]               = useState(false);   // mic recording active
+  const [generatingVoice, setGeneratingVoice]   = useState(false);   // waiting for TTS
 
   const scrollRef           = useRef<HTMLDivElement>(null);
   const fileInputRef        = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef    = useRef<MediaRecorder | null>(null);
+  const audioChunksRef      = useRef<Blob[]>([]);
   const router              = useRouter();
 
   // Stable refs — let realtime callbacks always see current values without stale closures
@@ -297,19 +302,28 @@ export default function ChatPage() {
     };
   }, [router, fetchConversations]);
 
+  // ─── Mic stop (defined early so openConversation can use it) ─
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && recording) {
+      mediaRecorderRef.current.stop();
+      setRecording(false);
+    }
+  }, [recording]);
+
   // ─── Switch active conversation ───────────────────────────
-  // When user taps a conversation in sidebar: load messages + subscribe
   const openConversation = useCallback((conv: Conversation, character: AICharacter | null) => {
     setActiveConversation(conv);
     setActiveCharacter(character);
     setShowSidebar(false);
     setShowCharacterInfo(false);
-    setMessages([]); // Clear immediately so old messages don't flash
+    setMessages([]);
+    setVoiceMode(false);
+    setGeneratingVoice(false);
+    if (recording) stopRecording();
 
-    // Load messages and start realtime subscription
     fetchMessages(conv.id);
     subscribeToMessages(conv.id);
-  }, [fetchMessages, subscribeToMessages]);
+  }, [fetchMessages, subscribeToMessages, recording, stopRecording]);
 
   // ─── Auto-scroll ──────────────────────────────────────────
   useEffect(() => {
@@ -375,6 +389,100 @@ export default function ChatPage() {
     }
   };
 
+  // ─── Request AI voice reply ──────────────────────────────
+  const requestVoiceReply = useCallback(async (textMessage: string, textHistory: { role: string; content: string }[]) => {
+    if (!activeConversation || !user || !activeCharacter) return;
+    setGeneratingVoice(true);
+    try {
+      const res = await fetch('/api/chat/voice', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          characterId:    activeCharacter.id,
+          message:        textMessage,
+          history:        textHistory,
+          conversationId: activeConversation.id,
+          userId:         user.id,
+        }),
+      });
+      const data = await res.json();
+      if (data.audioUrl) {
+        // Insert AI voice message into DB — realtime will pick it up
+        await supabase_client.from('project_v2_messages').insert({
+          conversation_id: activeConversation.id,
+          sender_id:       user.id,
+          role:            'assistant',
+          content:         data.textFallback || '',
+          message_type:    'audio',
+          media_url:       data.audioUrl,
+          media_name:      `${activeCharacter.name} voice reply`,
+          media_size:      null,
+        });
+      } else if (data.textFallback) {
+        // Audio not available — fall back to text
+        await supabase_client.from('project_v2_messages').insert({
+          conversation_id: activeConversation.id,
+          sender_id:       user.id,
+          role:            'assistant',
+          content:         data.textFallback,
+          message_type:    'text',
+        });
+      }
+    } catch (err) {
+      console.error('Voice reply error:', err);
+    } finally {
+      setGeneratingVoice(false);
+    }
+  }, [activeConversation, user, activeCharacter]);
+
+  // ─── Mic recording ─────────────────────────────────────────
+  const startRecording = useCallback(async () => {
+    if (recording) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        if (blob.size < 1000 || !activeConversation || !user) return;
+
+        setUploading(true);
+        const filePath = `${user.id}/${activeConversation.id}/voice_${Date.now()}.webm`;
+        const { error: uploadError } = await supabase_client.storage
+          .from('project-v2-media').upload(filePath, blob, { contentType: 'audio/webm' });
+
+        if (!uploadError) {
+          const { data: urlData } = supabase_client.storage
+            .from('project-v2-media').getPublicUrl(filePath);
+          await supabase_client.from('project_v2_messages').insert({
+            conversation_id: activeConversation.id,
+            sender_id:       user.id,
+            role:            'user',
+            content:         '',
+            message_type:    'audio',
+            media_url:       urlData.publicUrl,
+            media_name:      'Voice message',
+            media_size:      blob.size,
+          });
+        }
+        setUploading(false);
+      };
+
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+    } catch (err) {
+      console.error('Mic error:', err);
+      alert('Could not access microphone. Please allow microphone permission.');
+    }
+  }, [recording, activeConversation, user]);
+
   // ─── Send Message ─────────────────────────────────────────
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -420,35 +528,41 @@ export default function ChatPage() {
 
     // AI response
     if (activeCharacter) {
-      setSending(true);
-      try {
-        const history = messages
-          .filter((m) => !m.id.startsWith('temp-'))
-          .slice(-100)
-          .map((m) => ({ role: m.role, content: m.content }));
+      const history = messages
+        .filter((m) => !m.id.startsWith('temp-'))
+        .slice(-100)
+        .map((m) => ({ role: m.role, content: m.content }));
 
-        const res = await fetch('/api/chat/ai', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ characterId: activeCharacter.id, message: content, history }),
-        });
-
-        if (!res.ok) throw new Error(`AI API ${res.status}`);
-
-        const data = await res.json();
-        if (data.response) {
-          await supabase_client.from('project_v2_messages').insert({
-            conversation_id: activeConversation.id,
-            sender_id: user.id,
-            role: 'assistant',
-            content: data.response,
-            message_type: 'text',
+      if (voiceMode) {
+        // Voice mode: get TTS audio reply
+        await requestVoiceReply(content, history);
+      } else {
+        // Text mode: get text reply
+        setSending(true);
+        try {
+          const res = await fetch('/api/chat/ai', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ characterId: activeCharacter.id, message: content, history }),
           });
+
+          if (!res.ok) throw new Error(`AI API ${res.status}`);
+
+          const data = await res.json();
+          if (data.response) {
+            await supabase_client.from('project_v2_messages').insert({
+              conversation_id: activeConversation.id,
+              sender_id:       user.id,
+              role:            'assistant',
+              content:         data.response,
+              message_type:    'text',
+            });
+          }
+        } catch (err) {
+          console.error('AI error:', err);
+        } finally {
+          setSending(false);
         }
-      } catch (err) {
-        console.error('AI error:', err);
-      } finally {
-        setSending(false);
       }
     }
   };
@@ -762,7 +876,22 @@ export default function ChatPage() {
                   </button>
                 </div>
                 {activeCharacter && (
-                  <MusicPlayer mood={activeCharacter.musicMood} accentColor={activeCharacter.accentColor} />
+                  <div className="flex items-center gap-2">
+                    {/* Voice mode toggle */}
+                    <button
+                      onClick={() => setVoiceMode((v) => !v)}
+                      title={voiceMode ? 'Switch to text replies' : 'Switch to voice replies'}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all ${
+                        voiceMode
+                          ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400'
+                          : 'bg-white/[0.04] border-white/[0.06] text-white/30 hover:text-white/60'
+                      }`}
+                    >
+                      <Headphones className="w-3.5 h-3.5" />
+                      <span>{voiceMode ? 'Voice' : 'Text'}</span>
+                    </button>
+                    <MusicPlayer mood={activeCharacter.musicMood} accentColor={activeCharacter.accentColor} />
+                  </div>
                 )}
               </div>
 
@@ -893,19 +1022,36 @@ export default function ChatPage() {
                 })}
               </AnimatePresence>
 
-              {/* AI typing indicator */}
-              {sending && (
+              {/* AI typing / generating voice indicator */}
+              {(sending || generatingVoice) && (
                 <motion.div
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   className="flex justify-start mb-1"
                 >
                   <div className="bg-white/[0.08] rounded-2xl rounded-tl-md px-4 py-3">
-                    <div className="flex gap-1.5 items-center">
-                      <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '300ms' }} />
-                    </div>
+                    {generatingVoice ? (
+                      <div className="flex items-center gap-2">
+                        <div className="flex items-end gap-[3px]">
+                          {[8, 12, 10, 14, 8].map((h, i) => (
+                            <div key={i} className="w-[3px] rounded-full animate-pulse"
+                              style={{
+                                backgroundColor: activeCharacter?.accentColor || '#10b981',
+                                height: `${h}px`,
+                                animationDelay: `${i * 120}ms`,
+                              }}
+                            />
+                          ))}
+                        </div>
+                        <span className="text-[10px] text-white/30">generating voice...</span>
+                      </div>
+                    ) : (
+                      <div className="flex gap-1.5 items-center">
+                        <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '0ms' }} />
+                        <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '150ms' }} />
+                        <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '300ms' }} />
+                      </div>
+                    )}
                   </div>
                 </motion.div>
               )}
@@ -913,12 +1059,20 @@ export default function ChatPage() {
 
             {/* Input */}
             <div className="p-3 border-t border-white/[0.06] bg-[#0f0f12] flex-shrink-0">
-              {uploading && (
+              {(uploading || generatingVoice) && (
                 <div className="flex items-center gap-2 text-xs text-white/40 mb-2 px-2">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Uploading file...
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  {generatingVoice ? `${activeCharacter?.name} is speaking...` : 'Uploading file...'}
+                </div>
+              )}
+              {recording && (
+                <div className="flex items-center gap-2 text-xs text-red-400 mb-2 px-2 animate-pulse">
+                  <div className="w-2 h-2 rounded-full bg-red-400" />
+                  Recording... tap mic to send
                 </div>
               )}
               <form onSubmit={sendMessage} className="flex items-center gap-2">
+                {/* Attach file */}
                 <button type="button" onClick={() => fileInputRef.current?.click()}
                   className="p-2.5 rounded-xl hover:bg-white/[0.06] text-white/40 hover:text-white transition-colors flex-shrink-0"
                   title="Attach file">
@@ -927,6 +1081,8 @@ export default function ChatPage() {
                 <input ref={fileInputRef} type="file"
                   accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv"
                   onChange={handleFileUpload} className="hidden" />
+
+                {/* Text input */}
                 <input
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
@@ -936,12 +1092,37 @@ export default function ChatPage() {
                       sendMessage(e as any);
                     }
                   }}
-                  placeholder="Type a message"
-                  className="flex-1 bg-white/[0.06] border border-white/[0.08] rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/30 transition-colors placeholder:text-white/20"
+                  placeholder={voiceMode && activeCharacter ? `Type to get ${activeCharacter.name}'s voice reply...` : 'Type a message'}
+                  disabled={recording}
+                  className="flex-1 bg-white/[0.06] border border-white/[0.08] rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/30 transition-colors placeholder:text-white/20 disabled:opacity-40"
                 />
-                <button type="submit" disabled={!newMessage.trim() || sending}
+
+                {/* Mic button — only show for AI chats */}
+                {activeCharacter && (
+                  <button
+                    type="button"
+                    onMouseDown={startRecording}
+                    onMouseUp={stopRecording}
+                    onTouchStart={startRecording}
+                    onTouchEnd={stopRecording}
+                    title={recording ? 'Release to send voice message' : 'Hold to record voice message'}
+                    className={`p-2.5 rounded-xl transition-colors flex-shrink-0 ${
+                      recording
+                        ? 'bg-red-500 text-white animate-pulse'
+                        : 'bg-white/[0.06] text-white/40 hover:text-white hover:bg-white/[0.1]'
+                    }`}
+                  >
+                    {recording ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                  </button>
+                )}
+
+                {/* Send button */}
+                <button type="submit"
+                  disabled={!newMessage.trim() || sending || generatingVoice}
                   className="p-2.5 rounded-xl bg-emerald-500 text-black hover:bg-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0">
-                  <Send className="w-5 h-5" />
+                  {generatingVoice
+                    ? <Loader2 className="w-5 h-5 animate-spin" />
+                    : <Send className="w-5 h-5" />}
                 </button>
               </form>
             </div>
