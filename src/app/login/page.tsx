@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { supabase_client } from '@/lib/supabase_client';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -12,7 +12,19 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [checkingAuth, setCheckingAuth] = useState(true);
   const router = useRouter();
+
+  // Redirect already-authenticated users
+  useEffect(() => {
+    supabase_client.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        router.replace('/chat');
+      } else {
+        setCheckingAuth(false);
+      }
+    });
+  }, [router]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -44,8 +56,18 @@ export default function LoginPage() {
       } else {
         router.push('/chat');
       }
+    } else {
+      setLoading(false);
     }
   };
+
+  if (checkingAuth) {
+    return (
+      <div className="min-h-screen bg-[#09090b] flex items-center justify-center">
+        <Loader2 className="w-7 h-7 text-emerald-400 animate-spin" />
+      </div>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-[#09090b] text-white flex">

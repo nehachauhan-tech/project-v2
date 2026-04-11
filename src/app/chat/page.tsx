@@ -6,7 +6,7 @@ import {
   Send, Search, LogOut, User,
   Paperclip, FileText,
   MessageCircle, ArrowLeft, Loader2, CheckCheck,
-  Music, X, Volume2, VolumeX,
+  X, Volume2, VolumeX, Settings,
 } from 'lucide-react';
 import { supabase_client } from '@/lib/supabase_client';
 import { useRouter } from 'next/navigation';
@@ -300,21 +300,43 @@ export default function ChatPage() {
   // ─── Send Message ───
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim() || !activeConversation || !user) return;
+    if (!newMessage.trim() || !activeConversation || !user || sending) return;
 
-    const content = newMessage;
+    const content = newMessage.trim();
     setNewMessage('');
-    setSending(true);
 
-    await supabase_client.from('project_v2_messages').insert({
+    // Optimistic: show user message immediately before DB confirms
+    const optimisticId = `temp-${Date.now()}`;
+    const optimisticMsg: Message = {
+      id: optimisticId,
       conversation_id: activeConversation.id,
       sender_id: user.id,
       role: 'user',
       content,
       message_type: 'text',
-    });
+      media_url: null,
+      media_name: null,
+      media_size: null,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
+
+    // Insert to DB (realtime will push back confirmed msg and dedup will handle it)
+    const { data: insertedMsg } = await supabase_client.from('project_v2_messages').insert({
+      conversation_id: activeConversation.id,
+      sender_id: user.id,
+      role: 'user',
+      content,
+      message_type: 'text',
+    }).select().single();
+
+    // Replace optimistic message with confirmed one
+    if (insertedMsg) {
+      setMessages((prev) => prev.map((m) => m.id === optimisticId ? insertedMsg : m));
+    }
 
     if (activeCharacter) {
+      setSending(true);
       try {
         const recentMessages = messages.slice(-10);
         const res = await fetch('/api/chat/ai', {
@@ -335,14 +357,17 @@ export default function ChatPage() {
             content: data.response,
             message_type: 'text',
           });
+        } else if (data.error) {
+          console.error('AI error:', data.error);
         }
       } catch (err) {
-        console.error('AI error:', err);
+        console.error('AI fetch error:', err);
+      } finally {
+        setSending(false);
       }
     }
 
-    setSending(false);
-    if (user) fetchConversations(user.id);
+    fetchConversations(user.id);
   };
 
   // ─── File upload ───
@@ -442,7 +467,7 @@ export default function ChatPage() {
         {/* Header */}
         <div className="p-4 border-b border-white/[0.06]">
           <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3">
+            <button onClick={() => router.push('/profile')} className="flex items-center gap-3 hover:opacity-80 transition-opacity">
               <div className="w-10 h-10 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center">
                 {profile?.avatar_url ? (
                   <img src={profile.avatar_url} alt="" className="w-full h-full object-cover" />
@@ -450,14 +475,19 @@ export default function ChatPage() {
                   <User className="w-5 h-5 text-white/40" />
                 )}
               </div>
-              <div>
+              <div className="text-left">
                 <p className="font-semibold text-sm">{profile?.display_name}</p>
                 <p className="text-xs text-emerald-400">Online</p>
               </div>
-            </div>
-            <button onClick={handleLogout} className="p-2 rounded-lg hover:bg-white/[0.06] text-white/40 hover:text-white transition-colors" title="Log out">
-              <LogOut className="w-5 h-5" />
             </button>
+            <div className="flex items-center gap-1">
+              <button onClick={() => router.push('/profile')} className="p-2 rounded-lg hover:bg-white/[0.06] text-white/40 hover:text-white transition-colors" title="Edit profile">
+                <Settings className="w-5 h-5" />
+              </button>
+              <button onClick={handleLogout} className="p-2 rounded-lg hover:bg-white/[0.06] text-white/40 hover:text-white transition-colors" title="Log out">
+                <LogOut className="w-5 h-5" />
+              </button>
+            </div>
           </div>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
