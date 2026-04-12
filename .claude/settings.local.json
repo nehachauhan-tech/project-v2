@@ -9,7 +9,19 @@
       "WebFetch(domain:aistudio.google.com)",
       "WebFetch(domain:googleapis.github.io)",
       "WebFetch(domain:support.google.com)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(cat next.config.ts)",
+      "Bash(cat next.config.js)",
+      "Bash(cat next.config.mjs)",
+      "Bash(npx next:*)",
+      "Bash(node -e \"const { ThinkingLevel } = require\\('@google/genai'\\); console.log\\(Object.keys\\(ThinkingLevel\\)\\);\")",
+      "Bash(node -e \"const g = require\\('@google/genai'\\); console.log\\(Object.keys\\(g\\).filter\\(k => k.toLowerCase\\(\\).includes\\('live'\\) || k.toLowerCase\\(\\).includes\\('speech'\\) || k.toLowerCase\\(\\).includes\\('audio'\\) || k.toLowerCase\\(\\).includes\\('tts'\\)\\)\\);\")",
+      "Bash(node -e \"const g = require\\('@google/genai'\\); const ai = new g.GoogleGenAI\\({apiKey:'test'}\\); console.log\\(Object.keys\\(ai\\)\\);\")",
+      "Bash(node -e ':*)",
+      "Bash(node:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

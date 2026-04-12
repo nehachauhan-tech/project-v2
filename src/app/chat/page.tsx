@@ -4,9 +4,10 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Send, Search, LogOut, User,
-  Paperclip, FileText,
+  Paperclip, FileText, Play, Pause,
   MessageCircle, ArrowLeft, Loader2, CheckCheck,
   X, Volume2, VolumeX, Settings, Mic, MicOff, Headphones,
+  Music, Download, ExternalLink,
 } from 'lucide-react';
 import { supabase_client } from '@/lib/supabase_client';
 import { useRouter } from 'next/navigation';
@@ -38,6 +39,104 @@ function formatDate(dateStr: string) {
   if (d.toDateString() === today.toDateString()) return 'Today';
   if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+// ─── Audio Player (voice message bubbles) ──────────────────
+function AudioPlayer({ src, isOwn, accentColor }: { src: string; isOwn: boolean; accentColor?: string }) {
+  const [playing, setPlaying]   = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [loading, setLoading]   = useState(true);
+  const audioRef = useRef<HTMLAudioElement>(null);
+
+  const color = accentColor || '#10b981';
+
+  const toggle = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (playing) { el.pause(); setPlaying(false); }
+    else         { el.play().then(() => setPlaying(true)).catch(() => {}); }
+  };
+
+  const seek = (e: React.MouseEvent<HTMLDivElement>) => {
+    const el = audioRef.current;
+    if (!el || !duration) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = (e.clientX - rect.left) / rect.width;
+    el.currentTime = ratio * duration;
+  };
+
+  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+  return (
+    <div className="flex items-center gap-3 min-w-[200px] max-w-[280px]">
+      <audio
+        ref={audioRef}
+        src={src}
+        onLoadedMetadata={(e) => { setDuration(e.currentTarget.duration); setLoading(false); }}
+        onTimeUpdate={(e) => {
+          const el = e.currentTarget;
+          setProgress(el.duration ? el.currentTime / el.duration : 0);
+        }}
+        onEnded={() => { setPlaying(false); setProgress(0); }}
+      />
+
+      {/* Play / Pause */}
+      <button
+        onClick={toggle}
+        disabled={loading}
+        className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 transition-transform active:scale-95 disabled:opacity-40"
+        style={{ backgroundColor: isOwn ? 'rgba(255,255,255,0.2)' : color + '33' }}
+        aria-label={playing ? 'Pause' : 'Play'}
+      >
+        {loading
+          ? <Loader2 className="w-4 h-4 animate-spin text-white/50" />
+          : playing
+            ? <Pause className="w-4 h-4" style={{ color: isOwn ? '#fff' : color }} />
+            : <Play  className="w-4 h-4 ml-0.5" style={{ color: isOwn ? '#fff' : color }} />}
+      </button>
+
+      <div className="flex-1 min-w-0">
+        {/* Waveform progress bar */}
+        <div
+          className="relative h-8 flex items-center cursor-pointer group"
+          onClick={seek}
+          role="slider"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(progress * 100)}
+        >
+          {/* Track */}
+          <div className="absolute inset-y-0 flex items-center w-full gap-[2px]">
+            {Array.from({ length: 30 }).map((_, i) => {
+              const heights = [4,6,8,5,10,7,9,5,6,8,10,6,4,8,10,7,5,9,6,8,4,6,10,7,8,5,6,9,7,5];
+              const filled  = i / 30 < progress;
+              return (
+                <div
+                  key={i}
+                  className="flex-1 rounded-full transition-all duration-75"
+                  style={{
+                    height: `${heights[i]}px`,
+                    backgroundColor: filled
+                      ? (isOwn ? 'rgba(255,255,255,0.9)' : color)
+                      : (isOwn ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.15)'),
+                  }}
+                />
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Duration */}
+        <p className="text-[10px] mt-0.5" style={{ color: isOwn ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.3)' }}>
+          {fmt(audioRef.current?.currentTime ?? 0)} / {duration ? fmt(duration) : '--:--'}
+        </p>
+      </div>
+
+      {/* Mic icon label */}
+      <Music className="w-3.5 h-3.5 flex-shrink-0 opacity-30" />
+    </div>
+  );
 }
 
 // ─── Music Player ───────────────────────────────────────────
@@ -183,15 +282,13 @@ export default function ChatPage() {
 
     const bootstrap = async () => {
       try {
-        // Use getSession (local cache) — avoids network failure on init
-        const { data: { session } } = await supabase_client.auth.getSession();
+        // Use getUser instead of getSession to avoid stale local tokens causing a redirect loop
+        const { data: { user: currentUser } } = await supabase_client.auth.getUser();
 
-        if (!session?.user) {
+        if (!currentUser) {
           router.replace('/login');
           return;
         }
-
-        const currentUser = session.user;
 
         const { data: prof } = await supabase_client
           .from('project_v2_profiles')
@@ -881,14 +978,17 @@ export default function ChatPage() {
                     <button
                       onClick={() => setVoiceMode((v) => !v)}
                       title={voiceMode ? 'Switch to text replies' : 'Switch to voice replies'}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all ${
+                      className={`relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-semibold transition-all duration-200 select-none ${
                         voiceMode
-                          ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400'
-                          : 'bg-white/[0.04] border-white/[0.06] text-white/30 hover:text-white/60'
+                          ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.15)]'
+                          : 'bg-white/[0.04] border-white/[0.08] text-white/40 hover:text-white/70 hover:bg-white/[0.07] hover:border-white/[0.12]'
                       }`}
                     >
-                      <Headphones className="w-3.5 h-3.5" />
-                      <span>{voiceMode ? 'Voice' : 'Text'}</span>
+                      <Headphones className="w-4 h-4 flex-shrink-0" />
+                      <span className="hidden sm:inline">{voiceMode ? 'Voice On' : 'Voice'}</span>
+                      {voiceMode && (
+                        <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-[#0f0f12] animate-pulse" />
+                      )}
                     </button>
                     <MusicPlayer mood={activeCharacter.musicMood} accentColor={activeCharacter.accentColor} />
                   </div>
@@ -983,37 +1083,107 @@ export default function ChatPage() {
                         className={`flex ${fromMe ? 'justify-end' : 'justify-start'} mb-1`}
                       >
                         <div className="max-w-[75%] md:max-w-[60%]">
-                          <div className={`px-3.5 py-2 rounded-2xl ${fromMe ? 'bg-emerald-600 rounded-tr-md' : 'bg-white/[0.08] rounded-tl-md'}`}>
+                          <div className={`rounded-2xl overflow-hidden ${
+                            fromMe
+                              ? 'bg-emerald-600 rounded-tr-md'
+                              : 'bg-white/[0.08] rounded-tl-md'
+                          } ${m.message_type === 'image' ? 'p-0' : 'px-3.5 py-2.5'}`}>
+
+                            {/* Image */}
                             {m.message_type === 'image' && m.media_url && (
-                              <img src={m.media_url} alt="Shared image" className="rounded-xl max-w-full max-h-64 object-cover mb-1" />
-                            )}
-                            {m.message_type === 'video' && m.media_url && (
-                              <video src={m.media_url} controls className="rounded-xl max-w-full max-h-64 mb-1" />
-                            )}
-                            {m.message_type === 'audio' && m.media_url && (
-                              <audio src={m.media_url} controls className="max-w-full mb-1" />
-                            )}
-                            {m.message_type === 'document' && m.media_url && (
-                              <a href={m.media_url} target="_blank" rel="noopener noreferrer"
-                                className="flex items-center gap-2 p-2 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] transition-colors mb-1">
-                                <FileText className="w-5 h-5 text-emerald-400 flex-shrink-0" />
-                                <div className="min-w-0">
-                                  <p className="text-sm font-medium truncate">{m.media_name || 'Document'}</p>
-                                  {m.media_size && <p className="text-[10px] text-white/30">{(m.media_size / 1024).toFixed(0)} KB</p>}
+                              <div className="relative group">
+                                <img
+                                  src={m.media_url}
+                                  alt="Shared image"
+                                  className="block max-w-full max-h-72 object-cover rounded-2xl"
+                                  loading="lazy"
+                                />
+                                <a
+                                  href={m.media_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="absolute inset-0 flex items-end justify-end p-2 opacity-0 group-hover:opacity-100 transition-opacity"
+                                >
+                                  <span className="bg-black/60 backdrop-blur-sm rounded-lg p-1.5">
+                                    <ExternalLink className="w-3.5 h-3.5 text-white" />
+                                  </span>
+                                </a>
+                                {/* Timestamp overlay on image */}
+                                <div className="absolute bottom-2 right-2 flex items-center gap-1 bg-black/50 backdrop-blur-sm rounded-md px-1.5 py-0.5">
+                                  <span className="text-[10px] text-white/80">{formatTime(m.created_at)}</span>
+                                  {fromMe && (isTemp
+                                    ? <Loader2 className="w-3 h-3 text-white/60 animate-spin" />
+                                    : <CheckCheck className="w-3.5 h-3.5 text-white/60" />)}
                                 </div>
+                              </div>
+                            )}
+
+                            {/* Video */}
+                            {m.message_type === 'video' && m.media_url && (
+                              <div className="rounded-xl overflow-hidden bg-black mb-1.5">
+                                <video
+                                  src={m.media_url}
+                                  controls
+                                  className="max-w-full max-h-64 block"
+                                  preload="metadata"
+                                />
+                              </div>
+                            )}
+
+                            {/* Audio (voice message) */}
+                            {m.message_type === 'audio' && m.media_url && (
+                              <div className="mb-1">
+                                <AudioPlayer
+                                  src={m.media_url}
+                                  isOwn={fromMe}
+                                  accentColor={activeCharacter?.accentColor}
+                                />
+                              </div>
+                            )}
+
+                            {/* Document */}
+                            {m.message_type === 'document' && m.media_url && (
+                              <a
+                                href={m.media_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className={`flex items-center gap-3 p-2.5 rounded-xl mb-1.5 transition-colors ${
+                                  fromMe ? 'bg-white/[0.12] hover:bg-white/[0.2]' : 'bg-white/[0.06] hover:bg-white/[0.1]'
+                                }`}
+                              >
+                                <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${fromMe ? 'bg-white/[0.15]' : 'bg-emerald-500/15'}`}>
+                                  <FileText className={`w-5 h-5 ${fromMe ? 'text-white/80' : 'text-emerald-400'}`} />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-sm font-medium truncate">{m.media_name || 'Document'}</p>
+                                  {m.media_size && (
+                                    <p className={`text-[10px] mt-0.5 ${fromMe ? 'text-white/50' : 'text-white/30'}`}>
+                                      {m.media_size > 1024 * 1024
+                                        ? `${(m.media_size / (1024 * 1024)).toFixed(1)} MB`
+                                        : `${(m.media_size / 1024).toFixed(0)} KB`}
+                                    </p>
+                                  )}
+                                </div>
+                                <Download className={`w-4 h-4 flex-shrink-0 ${fromMe ? 'text-white/50' : 'text-white/30'}`} />
                               </a>
                             )}
-                            {m.content && (
+
+                            {/* Text content */}
+                            {m.content && m.message_type !== 'image' && (
                               <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{m.content}</p>
                             )}
-                            <div className={`flex items-center gap-1 mt-1 ${fromMe ? 'justify-end' : 'justify-start'}`}>
-                              <span className="text-[10px] text-white/20">{formatTime(m.created_at)}</span>
-                              {fromMe && (
-                                isTemp
-                                  ? <Loader2 className="w-3 h-3 text-white/20 animate-spin" />
-                                  : <CheckCheck className="w-3.5 h-3.5 text-white/30" />
-                              )}
-                            </div>
+
+                            {/* Timestamp — skip for image (overlaid above) */}
+                            {m.message_type !== 'image' && (
+                              <div className={`flex items-center gap-1 mt-1 ${fromMe ? 'justify-end' : 'justify-start'}`}>
+                                <span className="text-[10px] text-white/20">{formatTime(m.created_at)}</span>
+                                {fromMe && (
+                                  isTemp
+                                    ? <Loader2 className="w-3 h-3 text-white/20 animate-spin" />
+                                    : <CheckCheck className="w-3.5 h-3.5 text-white/30" />
+                                )}
+                              </div>
+                            )}
                           </div>
                         </div>
                       </motion.div>
@@ -1023,108 +1193,201 @@ export default function ChatPage() {
               </AnimatePresence>
 
               {/* AI typing / generating voice indicator */}
-              {(sending || generatingVoice) && (
-                <motion.div
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="flex justify-start mb-1"
-                >
-                  <div className="bg-white/[0.08] rounded-2xl rounded-tl-md px-4 py-3">
-                    {generatingVoice ? (
-                      <div className="flex items-center gap-2">
-                        <div className="flex items-end gap-[3px]">
-                          {[8, 12, 10, 14, 8].map((h, i) => (
-                            <div key={i} className="w-[3px] rounded-full animate-pulse"
-                              style={{
-                                backgroundColor: activeCharacter?.accentColor || '#10b981',
-                                height: `${h}px`,
-                                animationDelay: `${i * 120}ms`,
-                              }}
+              <AnimatePresence>
+                {(sending || generatingVoice) && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 4 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex justify-start mb-2"
+                  >
+                    <div className="flex items-center gap-3 bg-white/[0.06] border border-white/[0.06] rounded-2xl rounded-tl-md px-4 py-3">
+                      {/* Avatar */}
+                      {activeCharacter && (
+                        <div className={`w-7 h-7 rounded-full bg-gradient-to-br ${activeCharacter.gradient} flex items-center justify-center text-sm flex-shrink-0`}>
+                          {activeCharacter.avatar}
+                        </div>
+                      )}
+                      {generatingVoice ? (
+                        <div className="flex items-center gap-2">
+                          <div className="flex items-end gap-[3px]">
+                            {[6, 10, 8, 12, 7, 10, 6].map((h, i) => (
+                              <div
+                                key={i}
+                                className="w-[3px] rounded-full"
+                                style={{
+                                  backgroundColor: activeCharacter?.accentColor || '#10b981',
+                                  height: `${h}px`,
+                                  animation: 'pulse 0.7s ease-in-out infinite',
+                                  animationDelay: `${i * 80}ms`,
+                                }}
+                              />
+                            ))}
+                          </div>
+                          <span className="text-[11px] text-white/40 font-medium">
+                            {activeCharacter?.name} is speaking...
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="flex gap-[5px] items-center">
+                          {[0, 150, 300].map((delay) => (
+                            <div
+                              key={delay}
+                              className="w-2 h-2 rounded-full bg-white/40 animate-bounce"
+                              style={{ animationDelay: `${delay}ms`, animationDuration: '1s' }}
                             />
                           ))}
                         </div>
-                        <span className="text-[10px] text-white/30">generating voice...</span>
-                      </div>
-                    ) : (
-                      <div className="flex gap-1.5 items-center">
-                        <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '0ms' }} />
-                        <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '150ms' }} />
-                        <div className="w-2 h-2 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: '300ms' }} />
-                      </div>
-                    )}
-                  </div>
-                </motion.div>
-              )}
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
 
             {/* Input */}
-            <div className="p-3 border-t border-white/[0.06] bg-[#0f0f12] flex-shrink-0">
-              {(uploading || generatingVoice) && (
-                <div className="flex items-center gap-2 text-xs text-white/40 mb-2 px-2">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  {generatingVoice ? `${activeCharacter?.name} is speaking...` : 'Uploading file...'}
-                </div>
-              )}
-              {recording && (
-                <div className="flex items-center gap-2 text-xs text-red-400 mb-2 px-2 animate-pulse">
-                  <div className="w-2 h-2 rounded-full bg-red-400" />
-                  Recording... tap mic to send
-                </div>
-              )}
-              <form onSubmit={sendMessage} className="flex items-center gap-2">
-                {/* Attach file */}
-                <button type="button" onClick={() => fileInputRef.current?.click()}
-                  className="p-2.5 rounded-xl hover:bg-white/[0.06] text-white/40 hover:text-white transition-colors flex-shrink-0"
-                  title="Attach file">
-                  <Paperclip className="w-5 h-5" />
-                </button>
-                <input ref={fileInputRef} type="file"
-                  accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv"
-                  onChange={handleFileUpload} className="hidden" />
+            <div className="border-t border-white/[0.06] bg-[#0f0f12] flex-shrink-0">
 
-                {/* Text input */}
-                <input
-                  value={newMessage}
-                  onChange={(e) => setNewMessage(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      sendMessage(e as any);
-                    }
-                  }}
-                  placeholder={voiceMode && activeCharacter ? `Type to get ${activeCharacter.name}'s voice reply...` : 'Type a message'}
-                  disabled={recording}
-                  className="flex-1 bg-white/[0.06] border border-white/[0.08] rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/30 transition-colors placeholder:text-white/20 disabled:opacity-40"
-                />
+              {/* Status banners */}
+              <AnimatePresence>
+                {recording && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.15 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="flex items-center gap-3 px-4 py-2 bg-red-500/10 border-b border-red-500/20">
+                      {/* Animated recording dot */}
+                      <div className="relative flex-shrink-0">
+                        <div className="w-2.5 h-2.5 rounded-full bg-red-400" />
+                        <div className="absolute inset-0 rounded-full bg-red-400 animate-ping opacity-60" />
+                      </div>
+                      <div className="flex items-end gap-[2px] flex-shrink-0">
+                        {[5, 8, 6, 10, 7].map((h, i) => (
+                          <div
+                            key={i}
+                            className="w-[2px] rounded-full bg-red-400 animate-pulse"
+                            style={{ height: `${h}px`, animationDelay: `${i * 100}ms`, animationDuration: '0.6s' }}
+                          />
+                        ))}
+                      </div>
+                      <span className="text-xs text-red-400 font-medium flex-1">Recording... release mic to send</span>
+                      <button
+                        type="button"
+                        onClick={stopRecording}
+                        className="text-xs text-red-400/70 hover:text-red-400 underline transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+                {uploading && !recording && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.15 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="flex items-center gap-2 px-4 py-1.5 bg-white/[0.03] border-b border-white/[0.04]">
+                      <Loader2 className="w-3 h-3 animate-spin text-white/30" />
+                      <span className="text-xs text-white/30">Uploading file...</span>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
-                {/* Mic button — only show for AI chats */}
-                {activeCharacter && (
+              <div className="p-3">
+                <form onSubmit={sendMessage} className="flex items-center gap-2">
+                  {/* Attach file */}
                   <button
                     type="button"
-                    onMouseDown={startRecording}
-                    onMouseUp={stopRecording}
-                    onTouchStart={startRecording}
-                    onTouchEnd={stopRecording}
-                    title={recording ? 'Release to send voice message' : 'Hold to record voice message'}
-                    className={`p-2.5 rounded-xl transition-colors flex-shrink-0 ${
-                      recording
-                        ? 'bg-red-500 text-white animate-pulse'
-                        : 'bg-white/[0.06] text-white/40 hover:text-white hover:bg-white/[0.1]'
-                    }`}
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={recording}
+                    className="w-11 h-11 flex items-center justify-center rounded-xl hover:bg-white/[0.06] text-white/40 hover:text-white/70 disabled:opacity-30 transition-colors flex-shrink-0"
+                    title="Attach file (image, video, audio, document)"
                   >
-                    {recording ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                    <Paperclip className="w-5 h-5" />
                   </button>
-                )}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                  />
 
-                {/* Send button */}
-                <button type="submit"
-                  disabled={!newMessage.trim() || sending || generatingVoice}
-                  className="p-2.5 rounded-xl bg-emerald-500 text-black hover:bg-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0">
-                  {generatingVoice
-                    ? <Loader2 className="w-5 h-5 animate-spin" />
-                    : <Send className="w-5 h-5" />}
-                </button>
-              </form>
+                  {/* Text input */}
+                  <div className="relative flex-1">
+                    <input
+                      value={newMessage}
+                      onChange={(e) => setNewMessage(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          sendMessage(e as any);
+                        }
+                      }}
+                      placeholder={
+                        recording
+                          ? '🎙 Recording...'
+                          : voiceMode && activeCharacter
+                            ? `Message ${activeCharacter.name} (voice reply)`
+                            : 'Type a message...'
+                      }
+                      disabled={recording}
+                      className="w-full bg-white/[0.06] border border-white/[0.08] rounded-xl pl-4 pr-4 py-3 text-sm focus:outline-none focus:border-emerald-500/30 focus:bg-white/[0.08] transition-all placeholder:text-white/20 disabled:opacity-50"
+                    />
+                    {voiceMode && activeCharacter && !recording && (
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Mic button — only show for AI chats */}
+                  {activeCharacter && (
+                    <div className="relative flex-shrink-0">
+                      {/* Pulse ring while recording */}
+                      {recording && (
+                        <span className="absolute inset-0 rounded-xl bg-red-500 animate-ping opacity-30 pointer-events-none" />
+                      )}
+                      <button
+                        type="button"
+                        onMouseDown={startRecording}
+                        onMouseUp={stopRecording}
+                        onTouchStart={(e) => { e.preventDefault(); startRecording(); }}
+                        onTouchEnd={(e) => { e.preventDefault(); stopRecording(); }}
+                        aria-label={recording ? 'Release to send voice message' : 'Hold to record voice message'}
+                        title={recording ? 'Release to send voice message' : 'Hold to record voice message'}
+                        className={`w-11 h-11 flex items-center justify-center rounded-xl transition-all duration-150 active:scale-95 ${
+                          recording
+                            ? 'bg-red-500 text-white shadow-[0_0_16px_rgba(239,68,68,0.4)]'
+                            : 'bg-white/[0.06] text-white/50 hover:text-white hover:bg-white/[0.1] border border-white/[0.08] hover:border-white/[0.15]'
+                        }`}
+                      >
+                        {recording ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Send button */}
+                  <button
+                    type="submit"
+                    disabled={!newMessage.trim() || sending || generatingVoice || recording}
+                    aria-label="Send message"
+                    className="w-11 h-11 flex items-center justify-center rounded-xl bg-emerald-500 text-black hover:bg-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-150 active:scale-95 flex-shrink-0 shadow-[0_2px_8px_rgba(52,211,153,0.2)]"
+                  >
+                    {sending || generatingVoice
+                      ? <Loader2 className="w-5 h-5 animate-spin" />
+                      : <Send className="w-4.5 h-4.5" />}
+                  </button>
+                </form>
+              </div>
             </div>
           </>
         ) : (

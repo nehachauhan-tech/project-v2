@@ -19,8 +19,8 @@ export default function SignupPage() {
 
   // Redirect already-authenticated users
   useEffect(() => {
-    supabase_client.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
+    supabase_client.auth.getUser().then(({ data: { user } }) => {
+      if (user) {
         router.replace('/chat');
       } else {
         setCheckingAuth(false);

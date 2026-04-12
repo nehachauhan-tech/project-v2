@@ -5,8 +5,9 @@ import { motion, useScroll, useTransform } from 'framer-motion';
 import Link from 'next/link';
 import {
   MessageCircle, Shield, Bot, Users, Sparkles, ArrowRight,
-  Zap, Globe, Image, FileText, Mic, Video,
+  Zap, Globe, Image, FileText, Mic, Video, User, Settings
 } from 'lucide-react';
+import { supabase_client } from '@/lib/supabase_client';
 import { AI_CHARACTERS } from '@/data/characters';
 
 const FEATURES = [
@@ -41,6 +42,8 @@ const MEDIA_TYPES = [
 
 export default function LandingPage() {
   const [scrolled, setScrolled] = useState(false);
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [loadingAuth, setLoadingAuth] = useState(true);
   const { scrollYProgress } = useScroll();
   const heroOpacity = useTransform(scrollYProgress, [0, 0.15], [1, 0]);
   const heroScale = useTransform(scrollYProgress, [0, 0.15], [1, 0.95]);
@@ -48,6 +51,26 @@ export default function LandingPage() {
   useEffect(() => {
     const handleScroll = () => setScrolled(window.scrollY > 50);
     window.addEventListener('scroll', handleScroll);
+
+    const checkAuth = async () => {
+      try {
+        const { data: { user } } = await supabase_client.auth.getUser();
+        if (user) {
+          const { data: profile } = await supabase_client
+            .from('project_v2_profiles')
+            .select('*')
+            .eq('id', user.id)
+            .single();
+          setUserProfile(profile || { id: user.id });
+        }
+      } catch (err) {
+        console.error('Error checking auth:', err);
+      } finally {
+        setLoadingAuth(false);
+      }
+    };
+    checkAuth();
+
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
@@ -79,12 +102,29 @@ export default function LandingPage() {
           </div>
 
           <div className="flex items-center gap-3">
-            <Link href="/login" className="text-sm text-white/60 hover:text-white transition-colors px-4 py-2">
-              Log in
-            </Link>
-            <Link href="/signup" className="btn-primary text-sm !px-5 !py-2.5 flex items-center gap-2">
-              Get Started <ArrowRight className="w-4 h-4" />
-            </Link>
+            {!loadingAuth && userProfile ? (
+              <>
+                <Link href="/profile" className="text-sm text-white/60 hover:text-white transition-colors px-4 py-2 flex items-center gap-2">
+                  <Settings className="w-4 h-4" /> Start setting
+                </Link>
+                <Link href="/chat" className="w-10 h-10 rounded-full bg-white/[0.08] flex items-center justify-center overflow-hidden hover:opacity-80 transition-opacity border border-white/[0.05]">
+                  {userProfile.avatar_url ? (
+                    <img src={userProfile.avatar_url} alt="Profile" className="w-full h-full object-cover" />
+                  ) : (
+                    <User className="w-5 h-5 text-white/40" />
+                  )}
+                </Link>
+              </>
+            ) : !loadingAuth ? (
+              <>
+                <Link href="/login" className="text-sm text-white/60 hover:text-white transition-colors px-4 py-2">
+                  Log in
+                </Link>
+                <Link href="/signup" className="btn-primary text-sm !px-5 !py-2.5 flex items-center gap-2">
+                  Get Started <ArrowRight className="w-4 h-4" />
+                </Link>
+              </>
+            ) : null}
           </div>
         </div>
       </nav>
