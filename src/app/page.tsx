@@ -104,8 +104,8 @@ export default function LandingPage() {
           <div className="flex items-center gap-3">
             {!loadingAuth && userProfile ? (
               <>
-                <Link href="/profile" className="text-sm text-white/60 hover:text-white transition-colors px-4 py-2 flex items-center gap-2">
-                  <Settings className="w-4 h-4" /> Start setting
+                <Link href="/chat" className="text-sm text-white/60 hover:text-white transition-colors px-4 py-2 flex items-center gap-2">
+                  <MessageCircle className="w-4 h-4" /> Start chatting
                 </Link>
                 <Link href="/chat" className="w-10 h-10 rounded-full bg-white/[0.08] flex items-center justify-center overflow-hidden hover:opacity-80 transition-opacity border border-white/[0.05]">
                   {userProfile.avatar_url ? (
