@@ -7,12 +7,13 @@ import {
   Paperclip, FileText, Play, Pause,
   MessageCircle, ArrowLeft, Loader2, CheckCheck,
   X, Volume2, VolumeX, Settings, Mic, MicOff, Headphones,
-  Music, Download, ExternalLink,
+  Music, Download, ExternalLink, Phone, PhoneOff,
 } from 'lucide-react';
 import { supabase_client } from '@/lib/supabase_client';
 import { useRouter } from 'next/navigation';
 import { AI_CHARACTERS, CHARACTER_MAP, type AICharacter } from '@/data/characters';
 import type { Profile, Conversation, Message, OnlineUser, MessageType } from '@/types';
+import { useVoiceCall } from '@/hooks/useVoiceCall';
 
 const ACCEPT_TYPES: Record<string, MessageType> = {
   'image/': 'image',
@@ -204,6 +205,20 @@ export default function ChatPage() {
   userRef.current         = user;
   activeConvRef.current   = activeConversation;
 
+  // ─── Live voice call ─────────────────────────────────────
+  const [inLiveCall, setInLiveCall] = useState(false);
+  const voiceCall = useVoiceCall({
+    characterId: activeCharacter?.id ?? '',
+    onTranscript: useCallback((role: 'user' | 'assistant', text: string) => {
+      // Optionally capture transcripts — can be saved to DB later
+    }, []),
+  });
+
+  // Sync inLiveCall with voiceCall.status
+  useEffect(() => {
+    setInLiveCall(voiceCall.status === 'active' || voiceCall.status === 'connecting');
+  }, [voiceCall.status]);
+
   // ─── Fetch helpers ───────────────────────────────────────
   const fetchConversations = useCallback(async (userId: string) => {
     const { data } = await supabase_client
@@ -225,52 +240,60 @@ export default function ChatPage() {
 
   // ─── Subscribe to messages for a conversation ─────────────
   // Unsubscribes from any previous subscription first.
-  const subscribeToMessages = useCallback((conversationId: string) => {
+  // Returns a promise that resolves once the channel is SUBSCRIBED,
+  // so callers can wait before fetching initial messages.
+  const subscribeToMessages = useCallback((conversationId: string): Promise<void> => {
     // Remove old subscription cleanly
     if (msgSubRef.current) {
       supabase_client.removeChannel(msgSubRef.current);
       msgSubRef.current = null;
     }
 
-    const channel = supabase_client
-      .channel(`msgs-${conversationId}`)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'project_v2_messages',
-        filter: `conversation_id=eq.${conversationId}`,
-      }, (payload) => {
-        const incoming = payload.new as Message;
-        setMessages((prev) => {
-          // Replace matching optimistic temp message or deduplicate
-          const hasTemp = prev.some(
-            (m) => m.id.startsWith('temp-') &&
-                   m.sender_id === incoming.sender_id &&
-                   m.content === incoming.content &&
-                   m.role === incoming.role
-          );
-          if (hasTemp) {
-            return prev.map((m) =>
-              m.id.startsWith('temp-') &&
-              m.sender_id === incoming.sender_id &&
-              m.content === incoming.content &&
-              m.role === incoming.role
-                ? incoming
-                : m
-            );
+    return new Promise<void>((resolve) => {
+      const channel = supabase_client
+        .channel(`msgs-${conversationId}`)
+        .on('postgres_changes', {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'project_v2_messages',
+          filter: `conversation_id=eq.${conversationId}`,
+        }, (payload) => {
+          const incoming = payload.new as Message;
+          setMessages((prev) => {
+            // Replace the FIRST matching optimistic temp message (by sender + content + role)
+            let replaced = false;
+            const next = prev.map((m) => {
+              if (
+                !replaced &&
+                m.id.startsWith('temp-') &&
+                m.sender_id === incoming.sender_id &&
+                m.content === incoming.content &&
+                m.role === incoming.role
+              ) {
+                replaced = true;
+                return incoming;
+              }
+              return m;
+            });
+            if (replaced) return next;
+            // Deduplicate by real ID
+            if (prev.some((m) => m.id === incoming.id)) return prev;
+            return [...prev, incoming];
+          });
+        })
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            resolve();
           }
-          if (prev.some((m) => m.id === incoming.id)) return prev;
-          return [...prev, incoming];
+          // If subscription fails, fall back to a full fetch
+          if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+            fetchMessages(conversationId);
+            resolve(); // unblock caller even on error
+          }
         });
-      })
-      .subscribe((status) => {
-        // If subscription fails, fall back to a full fetch
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          fetchMessages(conversationId);
-        }
-      });
 
-    msgSubRef.current = channel;
+      msgSubRef.current = channel;
+    });
   }, [fetchMessages]);
 
   // ─── Auth + Init ─────────────────────────────────────────
@@ -408,7 +431,7 @@ export default function ChatPage() {
   }, [recording]);
 
   // ─── Switch active conversation ───────────────────────────
-  const openConversation = useCallback((conv: Conversation, character: AICharacter | null) => {
+  const openConversation = useCallback(async (conv: Conversation, character: AICharacter | null) => {
     setActiveConversation(conv);
     setActiveCharacter(character);
     setShowSidebar(false);
@@ -418,8 +441,10 @@ export default function ChatPage() {
     setGeneratingVoice(false);
     if (recording) stopRecording();
 
+    // Subscribe FIRST — wait until channel is active before fetching
+    // so no INSERT events are missed between fetch and subscribe.
+    await subscribeToMessages(conv.id);
     fetchMessages(conv.id);
-    subscribeToMessages(conv.id);
   }, [fetchMessages, subscribeToMessages, recording, stopRecording]);
 
   // ─── Auto-scroll ──────────────────────────────────────────
@@ -549,24 +574,56 @@ export default function ChatPage() {
         const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         if (blob.size < 1000 || !activeConversation || !user) return;
 
+        // Optimistic voice message — show immediately with spinner
+        const tempId = `temp-${Date.now()}`;
+        const localUrl = URL.createObjectURL(blob);
+        const optimistic: Message = {
+          id: tempId,
+          conversation_id: activeConversation.id,
+          sender_id: user.id,
+          role: 'user',
+          content: '',
+          message_type: 'audio',
+          media_url: localUrl,
+          media_name: 'Voice message',
+          media_size: blob.size,
+          created_at: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, optimistic]);
+
         setUploading(true);
         const filePath = `${user.id}/${activeConversation.id}/voice_${Date.now()}.webm`;
         const { error: uploadError } = await supabase_client.storage
           .from('project-v2-media').upload(filePath, blob, { contentType: 'audio/webm' });
 
-        if (!uploadError) {
-          const { data: urlData } = supabase_client.storage
-            .from('project-v2-media').getPublicUrl(filePath);
-          await supabase_client.from('project_v2_messages').insert({
-            conversation_id: activeConversation.id,
-            sender_id:       user.id,
-            role:            'user',
-            content:         '',
-            message_type:    'audio',
-            media_url:       urlData.publicUrl,
-            media_name:      'Voice message',
-            media_size:      blob.size,
+        if (uploadError) {
+          // Roll back optimistic message
+          setMessages((prev) => prev.filter((m) => m.id !== tempId));
+          setUploading(false);
+          return;
+        }
+
+        const { data: urlData } = supabase_client.storage
+          .from('project-v2-media').getPublicUrl(filePath);
+        const { data: insertedRow, error: insertErr } = await supabase_client.from('project_v2_messages').insert({
+          conversation_id: activeConversation.id,
+          sender_id:       user.id,
+          role:            'user',
+          content:         '',
+          message_type:    'audio',
+          media_url:       urlData.publicUrl,
+          media_name:      'Voice message',
+          media_size:      blob.size,
+        }).select().single();
+
+        // Reconcile: swap temp for real row
+        if (insertedRow) {
+          setMessages((prev) => {
+            if (!prev.some((m) => m.id === tempId)) return prev;
+            return prev.map((m) => m.id === tempId ? insertedRow : m);
           });
+        } else if (insertErr) {
+          setMessages((prev) => prev.filter((m) => m.id !== tempId));
         }
         setUploading(false);
       };
@@ -606,7 +663,7 @@ export default function ChatPage() {
 
     // Persist to DB — realtime will push back confirmed row
     // (subscribeToMessages dedup will swap the temp entry)
-    const { error: insertErr } = await supabase_client
+    const { data: insertedRow, error: insertErr } = await supabase_client
       .from('project_v2_messages')
       .insert({
         conversation_id: activeConversation.id,
@@ -614,14 +671,24 @@ export default function ChatPage() {
         role: 'user',
         content,
         message_type: 'text',
-      });
+      })
+      .select()
+      .single();
 
-    if (insertErr) {
+    if (insertErr || !insertedRow) {
       console.error('Message insert error:', insertErr);
       // Roll back optimistic message on failure
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       return;
     }
+
+    // Reconciliation: if realtime hasn't already swapped the temp, do it now.
+    // This prevents the spinner from getting stuck if the realtime event was missed.
+    setMessages((prev) => {
+      const alreadyResolved = !prev.some((m) => m.id === tempId);
+      if (alreadyResolved) return prev; // realtime already handled it
+      return prev.map((m) => m.id === tempId ? insertedRow : m);
+    });
 
     // AI response
     if (activeCharacter) {
@@ -670,19 +737,42 @@ export default function ChatPage() {
     if (!file || !activeConversation || !user) return;
     if (file.size > 50 * 1024 * 1024) { alert('File must be under 50MB.'); return; }
 
-    setUploading(true);
     const msgType = getMessageType(file);
+
+    // Optimistic message — show immediately with local preview
+    const tempId = `temp-${Date.now()}`;
+    const localUrl = URL.createObjectURL(file);
+    const optimistic: Message = {
+      id: tempId,
+      conversation_id: activeConversation.id,
+      sender_id: user.id,
+      role: 'user',
+      content: '',
+      message_type: msgType,
+      media_url: localUrl,
+      media_name: file.name,
+      media_size: file.size,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimistic]);
+
+    setUploading(true);
     const ext = file.name.split('.').pop();
     const filePath = `${user.id}/${activeConversation.id}/${Date.now()}.${ext}`;
 
     const { error: uploadError } = await supabase_client.storage
       .from('project-v2-media').upload(filePath, file);
-    if (uploadError) { console.error('Upload error:', uploadError); setUploading(false); return; }
+    if (uploadError) {
+      console.error('Upload error:', uploadError);
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+      setUploading(false);
+      return;
+    }
 
     const { data: urlData } = supabase_client.storage
       .from('project-v2-media').getPublicUrl(filePath);
 
-    await supabase_client.from('project_v2_messages').insert({
+    const { data: insertedRow, error: insertErr } = await supabase_client.from('project_v2_messages').insert({
       conversation_id: activeConversation.id,
       sender_id: user.id,
       role: 'user',
@@ -691,7 +781,17 @@ export default function ChatPage() {
       media_url: urlData.publicUrl,
       media_name: file.name,
       media_size: file.size,
-    });
+    }).select().single();
+
+    // Reconcile: swap temp for real row
+    if (insertedRow) {
+      setMessages((prev) => {
+        if (!prev.some((m) => m.id === tempId)) return prev;
+        return prev.map((m) => m.id === tempId ? insertedRow : m);
+      });
+    } else if (insertErr) {
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+    }
 
     setUploading(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -974,7 +1074,35 @@ export default function ChatPage() {
                 </div>
                 {activeCharacter && (
                   <div className="flex items-center gap-2">
-                    {/* Voice mode toggle */}
+                    {/* Live voice call button */}
+                    <button
+                      onClick={() => {
+                        if (inLiveCall) voiceCall.endCall();
+                        else voiceCall.startCall();
+                      }}
+                      disabled={voiceCall.status === 'connecting'}
+                      title={inLiveCall ? 'End voice call' : 'Start live voice call'}
+                      className={`relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-semibold transition-all duration-200 select-none ${
+                        inLiveCall
+                          ? 'bg-red-500/15 border-red-400/40 text-red-400 shadow-[0_0_12px_rgba(239,68,68,0.15)]'
+                          : voiceCall.status === 'connecting'
+                            ? 'bg-amber-500/15 border-amber-400/40 text-amber-400'
+                            : 'bg-white/[0.04] border-white/[0.08] text-white/40 hover:text-white/70 hover:bg-white/[0.07] hover:border-white/[0.12]'
+                      }`}
+                    >
+                      {voiceCall.status === 'connecting'
+                        ? <Loader2 className="w-4 h-4 flex-shrink-0 animate-spin" />
+                        : inLiveCall
+                          ? <PhoneOff className="w-4 h-4 flex-shrink-0" />
+                          : <Phone className="w-4 h-4 flex-shrink-0" />}
+                      <span className="hidden sm:inline">
+                        {voiceCall.status === 'connecting' ? 'Connecting...' : inLiveCall ? 'End Call' : 'Call'}
+                      </span>
+                      {inLiveCall && (
+                        <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-red-400 border-2 border-[#0f0f12] animate-pulse" />
+                      )}
+                    </button>
+                    {/* Voice mode toggle (text-triggered voice replies) */}
                     <button
                       onClick={() => setVoiceMode((v) => !v)}
                       title={voiceMode ? 'Switch to text replies' : 'Switch to voice replies'}
@@ -1033,10 +1161,152 @@ export default function ChatPage() {
               </AnimatePresence>
             </div>
 
+            {/* ══════════════ LIVE VOICE CALL OVERLAY ══════════════ */}
+            <AnimatePresence>
+              {inLiveCall && activeCharacter && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className="flex-1 flex flex-col items-center justify-center bg-gradient-to-b from-[#09090b] via-[#0a0a0f] to-[#09090b] relative overflow-hidden"
+                >
+                  {/* Background glow */}
+                  <div
+                    className="absolute inset-0 opacity-10"
+                    style={{
+                      background: `radial-gradient(circle at 50% 40%, ${activeCharacter.accentColor}40, transparent 70%)`,
+                    }}
+                  />
+
+                  {/* Content */}
+                  <div className="relative z-10 flex flex-col items-center gap-6">
+                    {/* Character avatar with speaking ring */}
+                    <div className="relative">
+                      {/* Outer speaking ring */}
+                      <div
+                        className={`absolute -inset-3 rounded-full transition-all duration-300 ${
+                          voiceCall.aiSpeaking
+                            ? 'opacity-100 scale-100 animate-[spin_3s_linear_infinite]'
+                            : 'opacity-0 scale-95'
+                        }`}
+                        style={{
+                          background: `conic-gradient(from 0deg, ${activeCharacter.accentColor}60, transparent, ${activeCharacter.accentColor}60)`,
+                        }}
+                      />
+                      <div
+                        className={`absolute -inset-2 rounded-full transition-all duration-300 ${
+                          voiceCall.aiSpeaking ? 'opacity-60' : 'opacity-0'
+                        }`}
+                        style={{
+                          boxShadow: `0 0 30px ${activeCharacter.accentColor}40, 0 0 60px ${activeCharacter.accentColor}20`,
+                        }}
+                      />
+                      <div className={`relative w-28 h-28 rounded-full bg-gradient-to-br ${activeCharacter.gradient} flex items-center justify-center text-5xl shadow-2xl`}>
+                        {activeCharacter.avatar}
+                      </div>
+                      {/* AI speaking waveform */}
+                      {voiceCall.aiSpeaking && (
+                        <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 flex items-end gap-[3px]">
+                          {[5, 8, 12, 10, 14, 10, 12, 8, 5].map((h, i) => (
+                            <div
+                              key={i}
+                              className="w-[3px] rounded-full"
+                              style={{
+                                backgroundColor: activeCharacter.accentColor,
+                                height: `${h}px`,
+                                animation: 'pulse 0.6s ease-in-out infinite',
+                                animationDelay: `${i * 70}ms`,
+                              }}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Character name */}
+                    <div className="text-center">
+                      <h2 className="text-xl font-bold">{activeCharacter.name}</h2>
+                      <p className="text-sm mt-1" style={{ color: activeCharacter.accentColor }}>
+                        {voiceCall.aiSpeaking ? 'Speaking...' : voiceCall.userSpeaking ? 'Listening...' : 'In call'}
+                      </p>
+                    </div>
+
+                    {/* Call duration */}
+                    <p className="text-sm text-white/30 font-mono tabular-nums">
+                      {Math.floor(voiceCall.callDuration / 60).toString().padStart(2, '0')}
+                      :{(voiceCall.callDuration % 60).toString().padStart(2, '0')}
+                    </p>
+
+                    {/* User speaking indicator */}
+                    <div className={`flex items-center gap-2 px-4 py-2 rounded-full transition-all duration-200 ${
+                      voiceCall.userSpeaking
+                        ? 'bg-emerald-500/15 border border-emerald-400/30'
+                        : 'bg-white/[0.04] border border-white/[0.06]'
+                    }`}>
+                      <Mic className={`w-4 h-4 ${voiceCall.userSpeaking ? 'text-emerald-400' : 'text-white/30'}`} />
+                      <span className={`text-xs font-medium ${voiceCall.userSpeaking ? 'text-emerald-400' : 'text-white/30'}`}>
+                        {voiceCall.isMuted ? 'Muted' : voiceCall.userSpeaking ? 'You\'re speaking' : 'Speak to chat'}
+                      </span>
+                      {voiceCall.userSpeaking && !voiceCall.isMuted && (
+                        <div className="flex items-end gap-[2px]">
+                          {[4, 7, 5, 8, 4].map((h, i) => (
+                            <div
+                              key={i}
+                              className="w-[2px] rounded-full bg-emerald-400 animate-pulse"
+                              style={{ height: `${h}px`, animationDelay: `${i * 80}ms`, animationDuration: '0.5s' }}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Call controls */}
+                    <div className="flex items-center gap-5 mt-4">
+                      {/* Mute toggle */}
+                      <button
+                        onClick={voiceCall.toggleMute}
+                        className={`w-14 h-14 rounded-full flex items-center justify-center transition-all duration-200 active:scale-95 ${
+                          voiceCall.isMuted
+                            ? 'bg-white/[0.15] text-white'
+                            : 'bg-white/[0.06] text-white/50 hover:bg-white/[0.1] hover:text-white'
+                        }`}
+                        title={voiceCall.isMuted ? 'Unmute' : 'Mute'}
+                      >
+                        {voiceCall.isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+                      </button>
+
+                      {/* End call */}
+                      <button
+                        onClick={voiceCall.endCall}
+                        className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center hover:bg-red-400 transition-all duration-200 active:scale-95 shadow-[0_0_20px_rgba(239,68,68,0.3)]"
+                        title="End call"
+                      >
+                        <PhoneOff className="w-7 h-7" />
+                      </button>
+
+                      {/* Speaker (placeholder) */}
+                      <button
+                        className="w-14 h-14 rounded-full bg-white/[0.06] text-white/50 flex items-center justify-center hover:bg-white/[0.1] hover:text-white transition-all duration-200 active:scale-95"
+                        title="Speaker"
+                      >
+                        <Volume2 className="w-6 h-6" />
+                      </button>
+                    </div>
+
+                    {/* Error message */}
+                    {voiceCall.error && (
+                      <p className="text-xs text-red-400 mt-2">{voiceCall.error}</p>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             {/* Messages */}
             <div
               ref={scrollRef}
-              className="flex-1 overflow-y-auto px-4 md:px-16 py-6 space-y-1 custom-scrollbar bg-[#09090b]"
+              className={`flex-1 overflow-y-auto px-4 md:px-16 py-6 space-y-1 custom-scrollbar bg-[#09090b] ${inLiveCall ? 'hidden' : ''}`}
             >
               {messages.length === 0 && !sending && (
                 <div className="flex flex-col items-center justify-center h-full text-center">
@@ -1246,8 +1516,8 @@ export default function ChatPage() {
               </AnimatePresence>
             </div>
 
-            {/* Input */}
-            <div className="border-t border-white/[0.06] bg-[#0f0f12] flex-shrink-0">
+            {/* Input — hidden during live voice call */}
+            <div className={`border-t border-white/[0.06] bg-[#0f0f12] flex-shrink-0 ${inLiveCall ? 'hidden' : ''}`}>
 
               {/* Status banners */}
               <AnimatePresence>

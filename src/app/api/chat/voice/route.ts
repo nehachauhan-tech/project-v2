@@ -1,4 +1,4 @@
-import { GoogleGenAI, Modality, type HarmCategory, type HarmBlockThreshold, ThinkingLevel } from '@google/genai';
+import { GoogleGenAI, Modality, type LiveServerMessage } from '@google/genai';
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { CHARACTER_MAP } from '@/data/characters';
@@ -11,17 +11,16 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-const CHAT_MODEL = 'gemini-3-flash-preview';
+const LIVE_MODEL = 'gemini-3.1-flash-live-preview';
 
-// Voice assigned to each character — chosen to match their personality
-// Available Gemini voices: Aoede, Charon, Fenrir, Kore, Puck, Orbit, Zephyr, Leda
+// Voice assigned to each character — user-specified mapping
 const CHARACTER_VOICES: Record<string, string> = {
-  sara:      'Aoede',    // Warm, friendly female voice
-  aman:      'Charon',   // Deep, authoritative male voice
-  surbhi:    'Kore',     // Soft, warm female voice
-  harry:     'Fenrir',   // Energetic young male voice
-  spiderman: 'Puck',     // Light, witty male voice
-  alex:      'Orbit',    // Adventurous, expressive male voice
+  sara:      'Sulafat',
+  aman:      'Charon',
+  surbhi:    'Achernar',
+  harry:     'Puck',
+  spiderman: 'Pulcherrima',
+  alex:      'Orbit',
 };
 
 const moodContext = `
@@ -37,16 +36,16 @@ Match your reply length to the user's message.
 // ── WAV helpers ────────────────────────────────────────────────────────────────
 
 function createWavHeader(dataByteLength: number, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Buffer {
-  const byteRate      = sampleRate * numChannels * bitsPerSample / 8;
-  const blockAlign    = numChannels * bitsPerSample / 8;
-  const header        = Buffer.alloc(44);
+  const byteRate   = sampleRate * numChannels * bitsPerSample / 8;
+  const blockAlign = numChannels * bitsPerSample / 8;
+  const header     = Buffer.alloc(44);
 
   header.write('RIFF', 0);
   header.writeUInt32LE(36 + dataByteLength, 4);
   header.write('WAVE', 8);
   header.write('fmt ', 12);
-  header.writeUInt32LE(16, 16);          // PCM chunk size
-  header.writeUInt16LE(1, 20);           // PCM format
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
   header.writeUInt16LE(numChannels, 22);
   header.writeUInt32LE(sampleRate, 24);
   header.writeUInt32LE(byteRate, 28);
@@ -58,14 +57,24 @@ function createWavHeader(dataByteLength: number, sampleRate = 24000, numChannels
   return header;
 }
 
-function buildWav(rawPcmChunks: string[], mimeType: string): Buffer {
-  // Parse sample rate from mimeType, e.g. "audio/pcm;rate=24000"
-  const rateMatch = mimeType.match(/rate=(\d+)/);
-  const sampleRate = rateMatch ? parseInt(rateMatch[1]) : 24000;
+function parseMimeType(mimeType: string): { sampleRate: number; bitsPerSample: number } {
+  const opts = { sampleRate: 24000, bitsPerSample: 16 };
 
+  const rateMatch = mimeType.match(/rate=(\d+)/);
+  if (rateMatch) opts.sampleRate = parseInt(rateMatch[1]);
+
+  // e.g. "audio/L16;rate=24000" → bitsPerSample = 16
+  const formatMatch = mimeType.match(/audio\/L(\d+)/);
+  if (formatMatch) opts.bitsPerSample = parseInt(formatMatch[1]);
+
+  return opts;
+}
+
+function buildWav(rawPcmChunks: string[], mimeType: string): Buffer {
+  const { sampleRate, bitsPerSample } = parseMimeType(mimeType);
   const pcmBuffers = rawPcmChunks.map((b64) => Buffer.from(b64, 'base64'));
   const pcmData    = Buffer.concat(pcmBuffers);
-  const wavHeader  = createWavHeader(pcmData.length, sampleRate);
+  const wavHeader  = createWavHeader(pcmData.length, sampleRate, 1, bitsPerSample);
   return Buffer.concat([wavHeader, pcmData]);
 }
 
@@ -84,61 +93,101 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Invalid character ID' }, { status: 400 });
     }
 
-    const voiceName  = CHARACTER_VOICES[characterId] ?? 'Aoede';
+    const voiceName  = CHARACTER_VOICES[characterId] ?? 'Sulafat';
     const systemText = character.systemPrompt + '\n\n' + moodContext;
 
-    // Build conversation history
-    const formattedHistory = (history || []).map((h: any) => ({
+    // Build conversation history for context
+    const historyTurns = (history || []).map((h: any) => ({
       role:  h.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: h.content }],
     }));
 
-    const contents = [
-      ...formattedHistory,
-      { role: 'user', parts: [{ text: message }] },
-    ];
-
-    // ── Call Gemini with AUDIO output ──────────────────────────────────────────
-    const response = await ai.models.generateContentStream({
-      model: CHAT_MODEL,
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName },
-          },
-        },
-        thinkingConfig:  { thinkingLevel: ThinkingLevel.MINIMAL },
-        temperature:     1,
-        topP:            0.95,
-        safetySettings: [
-          { category: 'HARM_CATEGORY_HATE_SPEECH'       as HarmCategory, threshold: 'OFF' as HarmBlockThreshold },
-          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT' as HarmCategory, threshold: 'OFF' as HarmBlockThreshold },
-          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT' as HarmCategory, threshold: 'OFF' as HarmBlockThreshold },
-          { category: 'HARM_CATEGORY_HARASSMENT'        as HarmCategory, threshold: 'OFF' as HarmBlockThreshold },
-        ],
-        systemInstruction: { parts: [{ text: systemText }] },
-      },
-      contents,
-    });
-
-    // Collect audio chunks + any text fallback
+    // ── Connect to Gemini Live API for real-time audio generation ──────────────
     const audioParts: string[] = [];
     let   mimeType             = 'audio/pcm;rate=24000';
     let   textFallback         = '';
 
-    for await (const chunk of response) {
-      const part = chunk.candidates?.[0]?.content?.parts?.[0];
-      if (part?.inlineData?.data) {
-        audioParts.push(part.inlineData.data);
-        if (part.inlineData.mimeType) mimeType = part.inlineData.mimeType;
-      }
-      if (chunk.text) textFallback += chunk.text;
-    }
+    // Promise that resolves when the model's turn is complete
+    const turnComplete = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        resolve(); // don't block forever — resolve after 30s
+      }, 30000);
+
+      ai.live.connect({
+        model: LIVE_MODEL,
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName },
+            },
+          },
+          systemInstruction: { parts: [{ text: systemText }] },
+        },
+        callbacks: {
+          onopen: () => {},
+          onmessage: (msg: LiveServerMessage) => {
+            // Collect audio data from the model's turn
+            if (msg.serverContent?.modelTurn?.parts) {
+              for (const part of msg.serverContent.modelTurn.parts) {
+                if (part.inlineData?.data) {
+                  audioParts.push(part.inlineData.data);
+                  if (part.inlineData.mimeType) mimeType = part.inlineData.mimeType;
+                }
+                if (part.text) {
+                  textFallback += part.text;
+                }
+              }
+            }
+
+            // Model finished its turn
+            if (msg.serverContent?.turnComplete) {
+              clearTimeout(timeout);
+              resolve();
+            }
+          },
+          onerror: (e: ErrorEvent) => {
+            console.error('Live session error:', e.message);
+            clearTimeout(timeout);
+            reject(new Error(e.message));
+          },
+          onclose: () => {
+            clearTimeout(timeout);
+            resolve();
+          },
+        },
+      }).then((session) => {
+        // Send conversation history as context (without triggering a response)
+        if (historyTurns.length > 0) {
+          session.sendClientContent({
+            turns: historyTurns,
+            turnComplete: false,
+          });
+        }
+
+        // Send the current user message and request a response
+        session.sendClientContent({
+          turns: [{ role: 'user', parts: [{ text: message }] }],
+          turnComplete: true,
+        });
+
+        // Close session once the turn completes
+        turnComplete.then(() => {
+          try { session.close(); } catch {}
+        });
+      }).catch((err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+
+    await turnComplete;
 
     if (audioParts.length === 0) {
-      // Model returned text only — fall back to text response
-      return NextResponse.json({ textFallback, audioUrl: null });
+      return NextResponse.json({
+        textFallback: textFallback || 'Sorry, I couldn\'t generate a voice reply.',
+        audioUrl: null,
+      });
     }
 
     // ── Build WAV ──────────────────────────────────────────────────────────────
