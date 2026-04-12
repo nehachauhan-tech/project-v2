@@ -1,4 +1,4 @@
-import { GoogleGenAI, Modality, type LiveServerMessage } from '@google/genai';
+import { GoogleGenAI, Modality, MediaResolution, type LiveServerMessage } from '@google/genai';
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { CHARACTER_MAP } from '@/data/characters';
@@ -14,7 +14,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-const LIVE_MODEL = 'gemini-2.0-flash-live-preview-04-09';
+const LIVE_MODEL = 'gemini-3.1-flash-live-preview';
 
 // Voice assigned to each character — user-specified mapping
 const CHARACTER_VOICES: Record<string, string> = {
@@ -120,12 +120,17 @@ export async function POST(req: Request) {
         model: LIVE_MODEL,
         config: {
           responseModalities: [Modality.AUDIO],
+          mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: { voiceName },
             },
           },
           systemInstruction: { parts: [{ text: systemText }] },
+          contextWindowCompression: {
+            triggerTokens: 104857,
+            slidingWindow: { targetTokens: 52428 },
+          },
         },
         callbacks: {
           onopen: () => {},

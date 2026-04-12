@@ -21,7 +21,10 @@
       "Bash(node -e \"const g = require\\('@google/genai'\\); const ai = new g.GoogleGenAI\\({apiKey:'test'}\\); console.log\\(Object.keys\\(ai\\)\\);\")",
       "Bash(node -e ':*)",
       "Bash(node:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/chat)",
+      "Bash(kill %1)",
+      "Bash(pkill -f \"next dev\")"
     ]
   }
 }
