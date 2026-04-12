@@ -128,8 +128,8 @@ export async function POST(req: Request) {
           },
           systemInstruction: { parts: [{ text: systemText }] },
           contextWindowCompression: {
-            triggerTokens: 104857,
-            slidingWindow: { targetTokens: 52428 },
+            triggerTokens: "104857",
+            slidingWindow: { targetTokens: "52428" },
           },
         },
         callbacks: {
