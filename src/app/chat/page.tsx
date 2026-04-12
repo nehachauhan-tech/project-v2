@@ -235,7 +235,21 @@ export default function ChatPage() {
       .select('*')
       .eq('conversation_id', conversationId)
       .order('created_at', { ascending: true });
-    if (!error && data) setMessages(data);
+    if (!error && data) {
+      // Merge: keep any optimistic (temp-*) messages that aren't yet in the DB result,
+      // but don't re-add messages that arrived via realtime already.
+      setMessages((prev) => {
+        const realIds = new Set(data.map((m) => m.id));
+        const pendingTemps = prev.filter((m) => m.id.startsWith('temp-'));
+        // Remove temps that have a real counterpart in the DB fetch (by content+sender+role)
+        const stillPending = pendingTemps.filter((t) =>
+          !data.some(
+            (d) => d.sender_id === t.sender_id && d.content === t.content && d.role === t.role
+          )
+        );
+        return [...data, ...stillPending];
+      });
+    }
   }, []);
 
   // ─── Subscribe to messages for a conversation ─────────────
@@ -260,15 +274,22 @@ export default function ChatPage() {
         }, (payload) => {
           const incoming = payload.new as Message;
           setMessages((prev) => {
-            // Replace the FIRST matching optimistic temp message (by sender + content + role)
+            // Deduplicate: if real ID already present, skip
+            if (prev.some((m) => m.id === incoming.id)) return prev;
+
+            // Own messages are reconciled in sendMessage/handleFileUpload/recorder.onstop
+            // via the returned insertedRow. Realtime is the fallback if that reconciliation
+            // already ran and cleared the temp, OR for the OTHER user's messages.
+            // Try to swap any matching temp (first match by sender+content+role+type).
             let replaced = false;
             const next = prev.map((m) => {
               if (
                 !replaced &&
                 m.id.startsWith('temp-') &&
                 m.sender_id === incoming.sender_id &&
+                m.role === incoming.role &&
                 m.content === incoming.content &&
-                m.role === incoming.role
+                m.message_type === incoming.message_type
               ) {
                 replaced = true;
                 return incoming;
@@ -276,8 +297,8 @@ export default function ChatPage() {
               return m;
             });
             if (replaced) return next;
-            // Deduplicate by real ID
-            if (prev.some((m) => m.id === incoming.id)) return prev;
+            // No matching temp — just append (other user's message, AI reply, or
+            // a message whose temp was already replaced by the insert reconciliation)
             return [...prev, incoming];
           });
         })
@@ -492,7 +513,7 @@ export default function ChatPage() {
     // Subscribe FIRST — wait until channel is active before fetching
     // so no INSERT events are missed between fetch and subscribe.
     await subscribeToMessages(conv.id);
-    fetchMessages(conv.id);
+    await fetchMessages(conv.id);
   }, [fetchMessages, subscribeToMessages, recording, stopRecording]);
 
   // ─── Auto-scroll ──────────────────────────────────────────
@@ -912,42 +933,59 @@ export default function ChatPage() {
 
   // ─── Render ───────────────────────────────────────────────
   return (
-    <main className="flex h-screen bg-[#09090b] text-white overflow-hidden">
+    <main className="flex h-[100dvh] bg-[#09090b] text-white overflow-hidden">
 
       {/* ══════════════ SIDEBAR ══════════════ */}
-      <aside className={`${showSidebar ? 'flex' : 'hidden md:flex'} w-full md:w-[380px] flex-col border-r border-white/[0.06] bg-[#0f0f12]`}>
-
+      <aside
+        className={`
+          ${showSidebar ? 'flex' : 'hidden md:flex'}
+          w-full md:w-[320px] lg:w-[380px] flex-shrink-0
+          flex-col border-r border-white/[0.06] bg-[#0f0f12]
+          absolute md:relative inset-0 md:inset-auto z-20 md:z-auto
+        `}
+      >
         {/* Sidebar header */}
-        <div className="p-4 border-b border-white/[0.06]">
-          <div className="flex items-center justify-between mb-4">
-            <button onClick={() => router.push('/profile')} className="flex items-center gap-3 hover:opacity-80 transition-opacity">
-              <div className="w-10 h-10 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center">
+        <div className="px-4 pt-4 pb-3 border-b border-white/[0.06] flex-shrink-0">
+          <div className="flex items-center justify-between mb-3">
+            <button
+              onClick={() => router.push('/profile')}
+              className="flex items-center gap-2.5 hover:opacity-80 transition-opacity min-w-0"
+            >
+              <div className="w-9 h-9 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center flex-shrink-0">
                 {profile?.avatar_url
                   ? <img src={profile.avatar_url} alt="" className="w-full h-full object-cover" />
-                  : <User className="w-5 h-5 text-white/40" />}
+                  : <User className="w-4 h-4 text-white/40" />}
               </div>
-              <div className="text-left">
-                <p className="font-semibold text-sm">{profile?.display_name}</p>
-                <p className="text-xs text-emerald-400">Online</p>
+              <div className="text-left min-w-0">
+                <p className="font-semibold text-sm truncate">{profile?.display_name}</p>
+                <p className="text-[10px] text-emerald-400">Online</p>
               </div>
             </button>
-            <div className="flex items-center gap-1">
-              <button onClick={() => router.push('/profile')} className="p-2 rounded-lg hover:bg-white/[0.06] text-white/40 hover:text-white transition-colors" title="Edit profile">
-                <Settings className="w-5 h-5" />
+            <div className="flex items-center gap-0.5 flex-shrink-0">
+              <button
+                onClick={() => router.push('/profile')}
+                className="p-2 rounded-lg hover:bg-white/[0.06] text-white/40 hover:text-white transition-colors"
+                title="Edit profile"
+              >
+                <Settings className="w-4 h-4" />
               </button>
-              <button onClick={handleLogout} className="p-2 rounded-lg hover:bg-white/[0.06] text-white/40 hover:text-white transition-colors" title="Log out">
-                <LogOut className="w-5 h-5" />
+              <button
+                onClick={handleLogout}
+                className="p-2 rounded-lg hover:bg-white/[0.06] text-white/40 hover:text-white transition-colors"
+                title="Log out"
+              >
+                <LogOut className="w-4 h-4" />
               </button>
             </div>
           </div>
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/30" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search people or characters..."
-              className="w-full bg-white/[0.06] rounded-lg pl-10 pr-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500/30 placeholder:text-white/20"
+              placeholder="Search..."
+              className="w-full bg-white/[0.06] rounded-lg pl-9 pr-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500/30 placeholder:text-white/20"
             />
           </div>
         </div>
@@ -957,15 +995,20 @@ export default function ChatPage() {
 
           {/* AI Characters */}
           <div className="px-4 pt-4 pb-2">
-            <p className="text-xs font-semibold text-white/30 uppercase tracking-wider mb-3">AI Characters</p>
+            <p className="text-[10px] font-semibold text-white/30 uppercase tracking-wider mb-3">AI Characters</p>
             <div className="flex gap-3 overflow-x-auto pb-2 custom-scrollbar">
               {filteredCharacters.map((c) => (
-                <button key={c.id} onClick={() => startCharacterConversation(c)}
-                  className="flex flex-col items-center gap-1.5 min-w-[60px] group">
-                  <div className={`w-12 h-12 rounded-full ${c.color} flex items-center justify-center text-lg shadow-lg group-hover:scale-110 transition-transform`}>
+                <button
+                  key={c.id}
+                  onClick={() => startCharacterConversation(c)}
+                  className="flex flex-col items-center gap-1.5 min-w-[56px] group"
+                >
+                  <div className={`w-11 h-11 rounded-full ${c.color} flex items-center justify-center text-base shadow-lg group-hover:scale-110 transition-transform`}>
                     {c.avatar}
                   </div>
-                  <span className="text-[10px] text-white/50 group-hover:text-white transition-colors truncate max-w-[60px]">{c.name}</span>
+                  <span className="text-[10px] text-white/50 group-hover:text-white transition-colors truncate max-w-[56px]">
+                    {c.name}
+                  </span>
                 </button>
               ))}
             </div>
@@ -976,31 +1019,32 @@ export default function ChatPage() {
           {/* Recent Conversations */}
           {conversations.length > 0 && (
             <div className="px-2 pt-3">
-              <p className="text-xs font-semibold text-white/30 uppercase tracking-wider mb-2 px-2">Recent Chats</p>
+              <p className="text-[10px] font-semibold text-white/30 uppercase tracking-wider mb-2 px-2">Recent Chats</p>
               {conversations.map((conv) => {
-                const character   = getCharacterForConv(conv);
-                const otherProf   = !character ? getOtherProfile(conv) : null;
-                const name        = character ? character.name : otherProf?.display_name || 'User';
-                const avatarUrl   = otherProf?.avatar_url;
-                const online      = !character && otherProf ? isUserOnline(otherProf.id) : !!character;
-                const isActive    = activeConversation?.id === conv.id;
+                const character = getCharacterForConv(conv);
+                const otherProf = !character ? getOtherProfile(conv) : null;
+                const name      = character ? character.name : otherProf?.display_name || 'User';
+                const avatarUrl = otherProf?.avatar_url;
+                const online    = !character && otherProf ? isUserOnline(otherProf.id) : !!character;
+                const isActive  = activeConversation?.id === conv.id;
 
                 return (
-                  <button key={conv.id}
+                  <button
+                    key={conv.id}
                     onClick={() => openConversation(conv, character || null)}
-                    className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors ${isActive ? 'bg-emerald-500/10' : 'hover:bg-white/[0.04]'}`}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-colors ${isActive ? 'bg-emerald-500/10' : 'hover:bg-white/[0.04]'}`}
                   >
                     <div className="relative flex-shrink-0">
-                      <div className="w-12 h-12 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center">
+                      <div className="w-10 h-10 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center">
                         {character
-                          ? <span className="text-xl">{character.avatar}</span>
+                          ? <span className="text-lg">{character.avatar}</span>
                           : avatarUrl
                             ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
-                            : <User className="w-5 h-5 text-white/30" />}
+                            : <User className="w-4 h-4 text-white/30" />}
                       </div>
                       {online && (
-                        <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-[#0f0f12] flex items-center justify-center">
-                          <div className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                        <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-[#0f0f12] flex items-center justify-center">
+                          <div className="w-2 h-2 rounded-full bg-emerald-500" />
                         </div>
                       )}
                     </div>
@@ -1026,22 +1070,27 @@ export default function ChatPage() {
           {/* Online Users */}
           {onlineProfiles.length > 0 && (
             <div className="px-2 pt-2">
-              <p className="text-xs font-semibold text-white/30 uppercase tracking-wider mb-2 px-2">
-                Online Now <span className="text-emerald-400">({onlineProfiles.length})</span>
+              <p className="text-[10px] font-semibold text-white/30 uppercase tracking-wider mb-2 px-2">
+                Online <span className="text-emerald-400">({onlineProfiles.length})</span>
               </p>
               {onlineProfiles.map((p) => (
-                <button key={p.id} onClick={() => startConversation(p.id)}
-                  className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-white/[0.04] transition-colors">
+                <button
+                  key={p.id}
+                  onClick={() => startConversation(p.id)}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/[0.04] transition-colors"
+                >
                   <div className="relative flex-shrink-0">
-                    <div className="w-10 h-10 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center">
-                      {p.avatar_url ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" /> : <User className="w-4 h-4 text-white/30" />}
+                    <div className="w-9 h-9 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center">
+                      {p.avatar_url
+                        ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" />
+                        : <User className="w-4 h-4 text-white/30" />}
                     </div>
-                    <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-[#0f0f12] flex items-center justify-center">
-                      <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                    <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-[#0f0f12] flex items-center justify-center">
+                      <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                     </div>
                   </div>
-                  <div className="text-left">
-                    <p className="text-sm font-medium">{p.display_name}</p>
+                  <div className="text-left min-w-0">
+                    <p className="text-sm font-medium truncate">{p.display_name}</p>
                     <p className="text-[10px] text-emerald-400">Online</p>
                   </div>
                 </button>
@@ -1052,15 +1101,20 @@ export default function ChatPage() {
           {/* Past Conversations */}
           {pastConvProfiles.length > 0 && (
             <div className="px-2 pt-2">
-              <p className="text-xs font-semibold text-white/30 uppercase tracking-wider mb-2 px-2">Past Conversations</p>
+              <p className="text-[10px] font-semibold text-white/30 uppercase tracking-wider mb-2 px-2">Past Chats</p>
               {pastConvProfiles.map((p) => (
-                <button key={p.id} onClick={() => startConversation(p.id)}
-                  className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-white/[0.04] transition-colors">
-                  <div className="w-10 h-10 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center flex-shrink-0">
-                    {p.avatar_url ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" /> : <User className="w-4 h-4 text-white/30" />}
+                <button
+                  key={p.id}
+                  onClick={() => startConversation(p.id)}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/[0.04] transition-colors"
+                >
+                  <div className="w-9 h-9 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center flex-shrink-0">
+                    {p.avatar_url
+                      ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <User className="w-4 h-4 text-white/30" />}
                   </div>
-                  <div className="text-left">
-                    <p className="text-sm font-medium">{p.display_name}</p>
+                  <div className="text-left min-w-0">
+                    <p className="text-sm font-medium truncate">{p.display_name}</p>
                     <p className="text-[10px] text-white/20">Offline</p>
                   </div>
                 </button>
@@ -1071,16 +1125,21 @@ export default function ChatPage() {
           {/* Discover People */}
           {otherProfiles.length > 0 && (
             <div className="px-2 pt-2 pb-4">
-              <p className="text-xs font-semibold text-white/30 uppercase tracking-wider mb-2 px-2">Discover People</p>
+              <p className="text-[10px] font-semibold text-white/30 uppercase tracking-wider mb-2 px-2">Discover</p>
               {otherProfiles.map((p) => (
-                <button key={p.id} onClick={() => startConversation(p.id)}
-                  className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-white/[0.04] transition-colors">
-                  <div className="w-10 h-10 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center flex-shrink-0">
-                    {p.avatar_url ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" /> : <User className="w-4 h-4 text-white/30" />}
+                <button
+                  key={p.id}
+                  onClick={() => startConversation(p.id)}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/[0.04] transition-colors"
+                >
+                  <div className="w-9 h-9 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center flex-shrink-0">
+                    {p.avatar_url
+                      ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : <User className="w-4 h-4 text-white/30" />}
                   </div>
-                  <div className="text-left">
-                    <p className="text-sm font-medium">{p.display_name}</p>
-                    {p.bio && <p className="text-[10px] text-white/20 truncate max-w-[200px]">{p.bio}</p>}
+                  <div className="text-left min-w-0">
+                    <p className="text-sm font-medium truncate">{p.display_name}</p>
+                    {p.bio && <p className="text-[10px] text-white/20 truncate">{p.bio}</p>}
                   </div>
                 </button>
               ))}
@@ -1093,80 +1152,81 @@ export default function ChatPage() {
       <div className={`${!showSidebar ? 'flex' : 'hidden md:flex'} flex-1 flex-col min-w-0`}>
         {activeConversation ? (
           <>
-            {/* Chat Header */}
+            {/* ── Chat Header ── */}
             <div className="border-b border-white/[0.06] bg-[#0f0f12] flex-shrink-0">
-              <div className="h-16 flex items-center justify-between px-4">
-                <div className="flex items-center gap-3 min-w-0">
-                  <button className="md:hidden p-1.5 rounded-lg hover:bg-white/[0.06] mr-1 flex-shrink-0"
-                    onClick={() => setShowSidebar(true)}>
-                    <ArrowLeft className="w-5 h-5" />
-                  </button>
-                  <button
-                    onClick={() => activeCharacter && setShowCharacterInfo(!showCharacterInfo)}
-                    className="flex items-center gap-3 min-w-0"
-                  >
-                    <div className={`w-10 h-10 rounded-full overflow-hidden flex items-center justify-center flex-shrink-0 ${activeCharacter ? `bg-gradient-to-br ${activeCharacter.gradient}` : 'bg-white/[0.08]'}`}>
-                      {activeCharacter
-                        ? <span className="text-xl">{activeCharacter.avatar}</span>
-                        : getOtherProfile(activeConversation)?.avatar_url
-                          ? <img src={getOtherProfile(activeConversation)!.avatar_url} alt="" className="w-full h-full object-cover" />
-                          : <User className="w-5 h-5 text-white/30" />}
-                    </div>
-                    <div className="text-left min-w-0">
-                      <p className="font-semibold text-sm truncate">{chatHeaderName}</p>
-                      <p className={`text-xs ${chatHeaderSub === 'Online' || activeCharacter ? 'text-emerald-400' : 'text-white/30'}`}>
-                        {chatHeaderSub}
-                      </p>
-                    </div>
-                  </button>
-                </div>
+              <div className="h-14 flex items-center gap-2 px-3">
+                {/* Back button (mobile) */}
+                <button
+                  className="md:hidden p-2 rounded-lg hover:bg-white/[0.06] text-white/50 hover:text-white transition-colors flex-shrink-0"
+                  onClick={() => setShowSidebar(true)}
+                >
+                  <ArrowLeft className="w-5 h-5" />
+                </button>
+
+                {/* Avatar + name */}
+                <button
+                  onClick={() => activeCharacter && setShowCharacterInfo(!showCharacterInfo)}
+                  className="flex items-center gap-2.5 min-w-0 flex-1"
+                >
+                  <div className={`w-9 h-9 rounded-full overflow-hidden flex items-center justify-center flex-shrink-0 ${activeCharacter ? `bg-gradient-to-br ${activeCharacter.gradient}` : 'bg-white/[0.08]'}`}>
+                    {activeCharacter
+                      ? <span className="text-lg">{activeCharacter.avatar}</span>
+                      : getOtherProfile(activeConversation)?.avatar_url
+                        ? <img src={getOtherProfile(activeConversation)!.avatar_url} alt="" className="w-full h-full object-cover" />
+                        : <User className="w-4 h-4 text-white/30" />}
+                  </div>
+                  <div className="text-left min-w-0">
+                    <p className="font-semibold text-sm truncate leading-tight">{chatHeaderName}</p>
+                    <p className={`text-[11px] leading-tight ${chatHeaderSub === 'Online' || activeCharacter ? 'text-emerald-400' : 'text-white/30'}`}>
+                      {chatHeaderSub}
+                    </p>
+                  </div>
+                </button>
+
+                {/* Actions (AI chats only) */}
                 {activeCharacter && (
-                  <div className="flex items-center gap-2">
-                    {/* Live voice call button */}
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    {/* Live call */}
                     <button
-                      onClick={() => {
-                        if (inLiveCall) voiceCall.endCall();
-                        else voiceCall.startCall();
-                      }}
+                      onClick={() => inLiveCall ? voiceCall.endCall() : voiceCall.startCall()}
                       disabled={voiceCall.status === 'connecting'}
-                      title={inLiveCall ? 'End voice call' : 'Start live voice call'}
-                      className={`relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-semibold transition-all duration-200 select-none ${
+                      title={inLiveCall ? 'End call' : 'Live voice call'}
+                      className={`relative w-9 h-9 flex items-center justify-center rounded-xl border transition-all duration-200 ${
                         inLiveCall
-                          ? 'bg-red-500/15 border-red-400/40 text-red-400 shadow-[0_0_12px_rgba(239,68,68,0.15)]'
+                          ? 'bg-red-500/15 border-red-400/30 text-red-400'
                           : voiceCall.status === 'connecting'
-                            ? 'bg-amber-500/15 border-amber-400/40 text-amber-400'
-                            : 'bg-white/[0.04] border-white/[0.08] text-white/40 hover:text-white/70 hover:bg-white/[0.07] hover:border-white/[0.12]'
+                            ? 'bg-amber-500/15 border-amber-400/30 text-amber-400'
+                            : 'bg-white/[0.04] border-white/[0.08] text-white/40 hover:text-white/70 hover:bg-white/[0.08]'
                       }`}
                     >
                       {voiceCall.status === 'connecting'
-                        ? <Loader2 className="w-4 h-4 flex-shrink-0 animate-spin" />
-                        : inLiveCall
-                          ? <PhoneOff className="w-4 h-4 flex-shrink-0" />
-                          : <Phone className="w-4 h-4 flex-shrink-0" />}
-                      <span className="hidden sm:inline">
-                        {voiceCall.status === 'connecting' ? 'Connecting...' : inLiveCall ? 'End Call' : 'Call'}
-                      </span>
+                        ? <Loader2 className="w-4 h-4 animate-spin" />
+                        : inLiveCall ? <PhoneOff className="w-4 h-4" /> : <Phone className="w-4 h-4" />}
                       {inLiveCall && (
-                        <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-red-400 border-2 border-[#0f0f12] animate-pulse" />
+                        <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-red-400 border border-[#0f0f12] animate-pulse" />
                       )}
                     </button>
-                    {/* Voice mode toggle (text-triggered voice replies) */}
+
+                    {/* Voice mode toggle */}
                     <button
                       onClick={() => setVoiceMode((v) => !v)}
-                      title={voiceMode ? 'Switch to text replies' : 'Switch to voice replies'}
-                      className={`relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-semibold transition-all duration-200 select-none ${
+                      title={voiceMode ? 'Text mode' : 'Voice reply mode'}
+                      className={`relative w-9 h-9 flex items-center justify-center rounded-xl border transition-all duration-200 ${
                         voiceMode
-                          ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.15)]'
-                          : 'bg-white/[0.04] border-white/[0.08] text-white/40 hover:text-white/70 hover:bg-white/[0.07] hover:border-white/[0.12]'
+                          ? 'bg-emerald-500/15 border-emerald-400/30 text-emerald-400'
+                          : 'bg-white/[0.04] border-white/[0.08] text-white/40 hover:text-white/70 hover:bg-white/[0.08]'
                       }`}
                     >
-                      <Headphones className="w-4 h-4 flex-shrink-0" />
-                      <span className="hidden sm:inline">{voiceMode ? 'Voice On' : 'Voice'}</span>
+                      <Headphones className="w-4 h-4" />
                       {voiceMode && (
-                        <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-[#0f0f12] animate-pulse" />
+                        <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 border border-[#0f0f12] animate-pulse" />
                       )}
                     </button>
-                    <MusicPlayer mood={activeCharacter.musicMood} accentColor={activeCharacter.accentColor} />
+
+                    {/* Music toggle — hidden on xs */}
+                    <div className="hidden sm:block">
+                      <MusicPlayer mood={activeCharacter.musicMood} accentColor={activeCharacter.accentColor} />
+                    </div>
                   </div>
                 )}
               </div>
@@ -1181,25 +1241,27 @@ export default function ChatPage() {
                     className="overflow-hidden border-t border-white/[0.06]"
                   >
                     <div className="p-4 bg-white/[0.02]">
-                      <div className="flex items-start gap-4">
-                        <div className={`w-16 h-16 rounded-2xl bg-gradient-to-br ${activeCharacter.gradient} flex items-center justify-center text-3xl shadow-lg flex-shrink-0`}>
+                      <div className="flex items-start gap-3">
+                        <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${activeCharacter.gradient} flex items-center justify-center text-2xl shadow-lg flex-shrink-0`}>
                           {activeCharacter.avatar}
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-1">
-                            <h3 className="font-bold">{activeCharacter.name}</h3>
-                            <span className="text-xs px-2 py-0.5 rounded-full bg-white/[0.06] text-white/40">{String(activeCharacter.age)}</span>
+                            <h3 className="font-bold text-sm">{activeCharacter.name}</h3>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white/[0.06] text-white/40">{String(activeCharacter.age)}</span>
                           </div>
-                          <p className="text-xs mb-2" style={{ color: activeCharacter.accentColor }}>{activeCharacter.role}</p>
-                          <p className="text-xs text-white/40 leading-relaxed">{activeCharacter.bio}</p>
-                          <div className="flex flex-wrap gap-1.5 mt-3">
+                          <p className="text-xs mb-1.5" style={{ color: activeCharacter.accentColor }}>{activeCharacter.role}</p>
+                          <p className="text-xs text-white/40 leading-relaxed line-clamp-3">{activeCharacter.bio}</p>
+                          <div className="flex flex-wrap gap-1 mt-2">
                             {activeCharacter.nature.map((t) => (
-                              <span key={t} className="text-[10px] px-2 py-0.5 rounded-full border border-white/[0.08] text-white/30">{t}</span>
+                              <span key={t} className="text-[10px] px-1.5 py-0.5 rounded-full border border-white/[0.08] text-white/30">{t}</span>
                             ))}
                           </div>
-                          <p className="text-[10px] text-white/20 mt-2 italic">&ldquo;{activeCharacter.motto}&rdquo;</p>
                         </div>
-                        <button onClick={() => setShowCharacterInfo(false)} className="p-1 rounded-lg hover:bg-white/[0.06] text-white/30 flex-shrink-0">
+                        <button
+                          onClick={() => setShowCharacterInfo(false)}
+                          className="p-1 rounded-lg hover:bg-white/[0.06] text-white/30 flex-shrink-0"
+                        >
                           <X className="w-4 h-4" />
                         </button>
                       </div>
@@ -1209,99 +1271,68 @@ export default function ChatPage() {
               </AnimatePresence>
             </div>
 
-            {/* ══════════════ LIVE VOICE CALL OVERLAY ══════════════ */}
+            {/* ══════ LIVE VOICE CALL OVERLAY ══════ */}
             <AnimatePresence>
               {inLiveCall && activeCharacter && (
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 0.3 }}
-                  className="flex-1 flex flex-col items-center justify-center bg-gradient-to-b from-[#09090b] via-[#0a0a0f] to-[#09090b] relative overflow-hidden"
+                  transition={{ duration: 0.25 }}
+                  className="flex-1 flex flex-col items-center justify-center relative overflow-hidden bg-[#09090b]"
                 >
-                  {/* Background glow */}
                   <div
-                    className="absolute inset-0 opacity-10"
-                    style={{
-                      background: `radial-gradient(circle at 50% 40%, ${activeCharacter.accentColor}40, transparent 70%)`,
-                    }}
+                    className="absolute inset-0 opacity-10 pointer-events-none"
+                    style={{ background: `radial-gradient(circle at 50% 40%, ${activeCharacter.accentColor}40, transparent 70%)` }}
                   />
 
-                  {/* Content */}
-                  <div className="relative z-10 flex flex-col items-center gap-6">
-                    {/* Character avatar with speaking ring */}
+                  <div className="relative z-10 flex flex-col items-center gap-5 px-6 w-full max-w-xs">
+                    {/* Avatar ring */}
                     <div className="relative">
-                      {/* Outer speaking ring */}
                       <div
-                        className={`absolute -inset-3 rounded-full transition-all duration-300 ${
-                          voiceCall.aiSpeaking
-                            ? 'opacity-100 scale-100 animate-[spin_3s_linear_infinite]'
-                            : 'opacity-0 scale-95'
-                        }`}
-                        style={{
-                          background: `conic-gradient(from 0deg, ${activeCharacter.accentColor}60, transparent, ${activeCharacter.accentColor}60)`,
-                        }}
+                        className={`absolute -inset-3 rounded-full transition-all duration-300 ${voiceCall.aiSpeaking ? 'opacity-100 animate-[spin_3s_linear_infinite]' : 'opacity-0'}`}
+                        style={{ background: `conic-gradient(from 0deg, ${activeCharacter.accentColor}60, transparent, ${activeCharacter.accentColor}60)` }}
                       />
                       <div
-                        className={`absolute -inset-2 rounded-full transition-all duration-300 ${
-                          voiceCall.aiSpeaking ? 'opacity-60' : 'opacity-0'
-                        }`}
-                        style={{
-                          boxShadow: `0 0 30px ${activeCharacter.accentColor}40, 0 0 60px ${activeCharacter.accentColor}20`,
-                        }}
+                        className={`absolute -inset-2 rounded-full transition-opacity duration-300 ${voiceCall.aiSpeaking ? 'opacity-60' : 'opacity-0'}`}
+                        style={{ boxShadow: `0 0 30px ${activeCharacter.accentColor}40` }}
                       />
-                      <div className={`relative w-28 h-28 rounded-full bg-gradient-to-br ${activeCharacter.gradient} flex items-center justify-center text-5xl shadow-2xl`}>
+                      <div className={`relative w-24 h-24 rounded-full bg-gradient-to-br ${activeCharacter.gradient} flex items-center justify-center text-4xl shadow-2xl`}>
                         {activeCharacter.avatar}
                       </div>
-                      {/* AI speaking waveform */}
                       {voiceCall.aiSpeaking && (
                         <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 flex items-end gap-[3px]">
-                          {[5, 8, 12, 10, 14, 10, 12, 8, 5].map((h, i) => (
-                            <div
-                              key={i}
-                              className="w-[3px] rounded-full"
-                              style={{
-                                backgroundColor: activeCharacter.accentColor,
-                                height: `${h}px`,
-                                animation: 'pulse 0.6s ease-in-out infinite',
-                                animationDelay: `${i * 70}ms`,
-                              }}
+                          {[4, 7, 10, 8, 12, 8, 10, 7, 4].map((h, i) => (
+                            <div key={i} className="w-[2.5px] rounded-full"
+                              style={{ backgroundColor: activeCharacter.accentColor, height: `${h}px`, animation: 'pulse 0.6s ease-in-out infinite', animationDelay: `${i * 70}ms` }}
                             />
                           ))}
                         </div>
                       )}
                     </div>
 
-                    {/* Character name */}
                     <div className="text-center">
-                      <h2 className="text-xl font-bold">{activeCharacter.name}</h2>
-                      <p className="text-sm mt-1" style={{ color: activeCharacter.accentColor }}>
+                      <h2 className="text-lg font-bold">{activeCharacter.name}</h2>
+                      <p className="text-sm mt-0.5" style={{ color: activeCharacter.accentColor }}>
                         {voiceCall.aiSpeaking ? 'Speaking...' : voiceCall.userSpeaking ? 'Listening...' : 'In call'}
                       </p>
                     </div>
 
-                    {/* Call duration */}
                     <p className="text-sm text-white/30 font-mono tabular-nums">
-                      {Math.floor(voiceCall.callDuration / 60).toString().padStart(2, '0')}
-                      :{(voiceCall.callDuration % 60).toString().padStart(2, '0')}
+                      {Math.floor(voiceCall.callDuration / 60).toString().padStart(2, '0')}:{(voiceCall.callDuration % 60).toString().padStart(2, '0')}
                     </p>
 
-                    {/* User speaking indicator */}
                     <div className={`flex items-center gap-2 px-4 py-2 rounded-full transition-all duration-200 ${
-                      voiceCall.userSpeaking
-                        ? 'bg-emerald-500/15 border border-emerald-400/30'
-                        : 'bg-white/[0.04] border border-white/[0.06]'
+                      voiceCall.userSpeaking ? 'bg-emerald-500/15 border border-emerald-400/30' : 'bg-white/[0.04] border border-white/[0.06]'
                     }`}>
                       <Mic className={`w-4 h-4 ${voiceCall.userSpeaking ? 'text-emerald-400' : 'text-white/30'}`} />
                       <span className={`text-xs font-medium ${voiceCall.userSpeaking ? 'text-emerald-400' : 'text-white/30'}`}>
-                        {voiceCall.isMuted ? 'Muted' : voiceCall.userSpeaking ? 'You\'re speaking' : 'Speak to chat'}
+                        {voiceCall.isMuted ? 'Muted' : voiceCall.userSpeaking ? "You're speaking" : 'Speak to chat'}
                       </span>
                       {voiceCall.userSpeaking && !voiceCall.isMuted && (
                         <div className="flex items-end gap-[2px]">
-                          {[4, 7, 5, 8, 4].map((h, i) => (
-                            <div
-                              key={i}
-                              className="w-[2px] rounded-full bg-emerald-400 animate-pulse"
+                          {[4, 6, 5, 7, 4].map((h, i) => (
+                            <div key={i} className="w-[2px] rounded-full bg-emerald-400 animate-pulse"
                               style={{ height: `${h}px`, animationDelay: `${i * 80}ms`, animationDuration: '0.5s' }}
                             />
                           ))}
@@ -1309,68 +1340,53 @@ export default function ChatPage() {
                       )}
                     </div>
 
-                    {/* Call controls */}
-                    <div className="flex items-center gap-5 mt-4">
-                      {/* Mute toggle */}
+                    {/* Controls */}
+                    <div className="flex items-center gap-5 mt-2">
                       <button
                         onClick={voiceCall.toggleMute}
-                        className={`w-14 h-14 rounded-full flex items-center justify-center transition-all duration-200 active:scale-95 ${
-                          voiceCall.isMuted
-                            ? 'bg-white/[0.15] text-white'
-                            : 'bg-white/[0.06] text-white/50 hover:bg-white/[0.1] hover:text-white'
+                        className={`w-14 h-14 rounded-full flex items-center justify-center transition-all active:scale-95 ${
+                          voiceCall.isMuted ? 'bg-white/[0.15] text-white' : 'bg-white/[0.06] text-white/50 hover:bg-white/[0.1] hover:text-white'
                         }`}
-                        title={voiceCall.isMuted ? 'Unmute' : 'Mute'}
                       >
                         {voiceCall.isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
                       </button>
-
-                      {/* End call */}
                       <button
                         onClick={voiceCall.endCall}
-                        className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center hover:bg-red-400 transition-all duration-200 active:scale-95 shadow-[0_0_20px_rgba(239,68,68,0.3)]"
-                        title="End call"
+                        className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center hover:bg-red-400 transition-all active:scale-95 shadow-[0_0_20px_rgba(239,68,68,0.3)]"
                       >
                         <PhoneOff className="w-7 h-7" />
                       </button>
-
-                      {/* Speaker (placeholder) */}
-                      <button
-                        className="w-14 h-14 rounded-full bg-white/[0.06] text-white/50 flex items-center justify-center hover:bg-white/[0.1] hover:text-white transition-all duration-200 active:scale-95"
-                        title="Speaker"
-                      >
+                      <button className="w-14 h-14 rounded-full bg-white/[0.06] text-white/50 flex items-center justify-center hover:bg-white/[0.1] hover:text-white transition-all active:scale-95">
                         <Volume2 className="w-6 h-6" />
                       </button>
                     </div>
 
-                    {/* Error message */}
-                    {voiceCall.error && (
-                      <p className="text-xs text-red-400 mt-2">{voiceCall.error}</p>
-                    )}
+                    {voiceCall.error && <p className="text-xs text-red-400 text-center">{voiceCall.error}</p>}
                   </div>
                 </motion.div>
               )}
             </AnimatePresence>
 
-            {/* Messages */}
+            {/* ══════ MESSAGES ══════ */}
             <div
               ref={scrollRef}
-              className={`flex-1 overflow-y-auto px-4 md:px-16 py-6 space-y-1 custom-scrollbar bg-[#09090b] ${inLiveCall ? 'hidden' : ''}`}
+              className={`flex-1 overflow-y-auto px-3 sm:px-4 md:px-8 lg:px-16 py-4 space-y-0.5 custom-scrollbar bg-[#09090b] ${inLiveCall ? 'hidden' : ''}`}
             >
               {messages.length === 0 && !sending && (
-                <div className="flex flex-col items-center justify-center h-full text-center">
-                  <div className={`w-20 h-20 rounded-2xl flex items-center justify-center mb-4 ${activeCharacter ? `bg-gradient-to-br ${activeCharacter.gradient}` : 'bg-white/[0.06]'}`}>
+                <div className="flex flex-col items-center justify-center h-full text-center px-4">
+                  <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${activeCharacter ? `bg-gradient-to-br ${activeCharacter.gradient}` : 'bg-white/[0.06]'}`}>
                     {activeCharacter
-                      ? <span className="text-4xl">{activeCharacter.avatar}</span>
-                      : <MessageCircle className="w-8 h-8 text-white/20" />}
+                      ? <span className="text-3xl">{activeCharacter.avatar}</span>
+                      : <MessageCircle className="w-7 h-7 text-white/20" />}
                   </div>
-                  <p className="font-semibold text-lg mb-1">
+                  <p className="font-semibold text-base mb-1">
                     {activeCharacter ? activeCharacter.name : 'Start chatting'}
                   </p>
                   <p className="text-white/30 text-sm max-w-xs">
                     {activeCharacter ? activeCharacter.motto : 'Send a message to start the conversation.'}
                   </p>
                   {activeCharacter && (
-                    <p className="text-white/20 text-xs mt-2 max-w-sm">{activeCharacter.bio.slice(0, 100)}...</p>
+                    <p className="text-white/20 text-xs mt-2 max-w-[260px] line-clamp-3">{activeCharacter.bio}</p>
                   )}
                 </div>
               )}
@@ -1379,10 +1395,8 @@ export default function ChatPage() {
                 {messages.map((m, idx) => {
                   const fromMe = m.role === 'user' && m.sender_id === user?.id;
                   const isTemp = m.id.startsWith('temp-');
-
                   const showDateSep = idx === 0 || (
-                    new Date(messages[idx - 1].created_at).toDateString() !==
-                    new Date(m.created_at).toDateString()
+                    new Date(messages[idx - 1].created_at).toDateString() !== new Date(m.created_at).toDateString()
                   );
 
                   return (
@@ -1395,17 +1409,15 @@ export default function ChatPage() {
                         </div>
                       )}
                       <motion.div
-                        initial={{ opacity: 0, y: 8 }}
+                        initial={{ opacity: 0, y: 6 }}
                         animate={{ opacity: isTemp ? 0.7 : 1, y: 0 }}
                         transition={{ duration: 0.15 }}
-                        className={`flex ${fromMe ? 'justify-end' : 'justify-start'} mb-1`}
+                        className={`flex ${fromMe ? 'justify-end' : 'justify-start'} mb-0.5`}
                       >
-                        <div className="max-w-[75%] md:max-w-[60%]">
+                        <div className="max-w-[82%] sm:max-w-[72%] md:max-w-[65%]">
                           <div className={`rounded-2xl overflow-hidden ${
-                            fromMe
-                              ? 'bg-emerald-600 rounded-tr-md'
-                              : 'bg-white/[0.08] rounded-tl-md'
-                          } ${m.message_type === 'image' ? 'p-0' : 'px-3.5 py-2.5'}`}>
+                            fromMe ? 'bg-emerald-600 rounded-tr-sm' : 'bg-white/[0.08] rounded-tl-sm'
+                          } ${m.message_type === 'image' ? 'p-0' : 'px-3 py-2.5'}`}>
 
                             {/* Image */}
                             {m.message_type === 'image' && m.media_url && (
@@ -1413,25 +1425,20 @@ export default function ChatPage() {
                                 <img
                                   src={m.media_url}
                                   alt="Shared image"
-                                  className="block max-w-full max-h-72 object-cover rounded-2xl"
+                                  className="block max-w-full max-h-64 sm:max-h-72 object-cover rounded-2xl"
                                   loading="lazy"
                                 />
-                                <a
-                                  href={m.media_url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="absolute inset-0 flex items-end justify-end p-2 opacity-0 group-hover:opacity-100 transition-opacity"
-                                >
+                                <a href={m.media_url} target="_blank" rel="noopener noreferrer"
+                                  className="absolute inset-0 flex items-end justify-end p-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                   <span className="bg-black/60 backdrop-blur-sm rounded-lg p-1.5">
                                     <ExternalLink className="w-3.5 h-3.5 text-white" />
                                   </span>
                                 </a>
-                                {/* Timestamp overlay on image */}
                                 <div className="absolute bottom-2 right-2 flex items-center gap-1 bg-black/50 backdrop-blur-sm rounded-md px-1.5 py-0.5">
                                   <span className="text-[10px] text-white/80">{formatTime(m.created_at)}</span>
                                   {fromMe && (isTemp
                                     ? <Loader2 className="w-3 h-3 text-white/60 animate-spin" />
-                                    : <CheckCheck className="w-3.5 h-3.5 text-white/60" />)}
+                                    : <CheckCheck className="w-3 h-3 text-white/60" />)}
                                 </div>
                               </div>
                             )}
@@ -1439,59 +1446,44 @@ export default function ChatPage() {
                             {/* Video */}
                             {m.message_type === 'video' && m.media_url && (
                               <div className="rounded-xl overflow-hidden bg-black mb-1.5">
-                                <video
-                                  src={m.media_url}
-                                  controls
-                                  className="max-w-full max-h-64 block"
-                                  preload="metadata"
-                                />
+                                <video src={m.media_url} controls className="max-w-full max-h-56 block" preload="metadata" />
                               </div>
                             )}
 
-                            {/* Audio (voice message) */}
+                            {/* Audio */}
                             {m.message_type === 'audio' && m.media_url && (
                               <div className="mb-1">
-                                <AudioPlayer
-                                  src={m.media_url}
-                                  isOwn={fromMe}
-                                  accentColor={activeCharacter?.accentColor}
-                                />
+                                <AudioPlayer src={m.media_url} isOwn={fromMe} accentColor={activeCharacter?.accentColor} />
                               </div>
                             )}
 
                             {/* Document */}
                             {m.message_type === 'document' && m.media_url && (
-                              <a
-                                href={m.media_url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className={`flex items-center gap-3 p-2.5 rounded-xl mb-1.5 transition-colors ${
-                                  fromMe ? 'bg-white/[0.12] hover:bg-white/[0.2]' : 'bg-white/[0.06] hover:bg-white/[0.1]'
-                                }`}
-                              >
-                                <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${fromMe ? 'bg-white/[0.15]' : 'bg-emerald-500/15'}`}>
-                                  <FileText className={`w-5 h-5 ${fromMe ? 'text-white/80' : 'text-emerald-400'}`} />
+                              <a href={m.media_url} target="_blank" rel="noopener noreferrer"
+                                className={`flex items-center gap-2.5 p-2.5 rounded-xl mb-1.5 transition-colors ${fromMe ? 'bg-white/[0.12] hover:bg-white/[0.2]' : 'bg-white/[0.06] hover:bg-white/[0.1]'}`}>
+                                <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${fromMe ? 'bg-white/[0.15]' : 'bg-emerald-500/15'}`}>
+                                  <FileText className={`w-4 h-4 ${fromMe ? 'text-white/80' : 'text-emerald-400'}`} />
                                 </div>
                                 <div className="min-w-0 flex-1">
-                                  <p className="text-sm font-medium truncate">{m.media_name || 'Document'}</p>
+                                  <p className="text-xs font-medium truncate">{m.media_name || 'Document'}</p>
                                   {m.media_size && (
                                     <p className={`text-[10px] mt-0.5 ${fromMe ? 'text-white/50' : 'text-white/30'}`}>
-                                      {m.media_size > 1024 * 1024
-                                        ? `${(m.media_size / (1024 * 1024)).toFixed(1)} MB`
+                                      {m.media_size > 1048576
+                                        ? `${(m.media_size / 1048576).toFixed(1)} MB`
                                         : `${(m.media_size / 1024).toFixed(0)} KB`}
                                     </p>
                                   )}
                                 </div>
-                                <Download className={`w-4 h-4 flex-shrink-0 ${fromMe ? 'text-white/50' : 'text-white/30'}`} />
+                                <Download className={`w-3.5 h-3.5 flex-shrink-0 ${fromMe ? 'text-white/50' : 'text-white/30'}`} />
                               </a>
                             )}
 
-                            {/* Text content */}
+                            {/* Text */}
                             {m.content && m.message_type !== 'image' && (
                               <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{m.content}</p>
                             )}
 
-                            {/* Timestamp — skip for image (overlaid above) */}
+                            {/* Timestamp (non-image) */}
                             {m.message_type !== 'image' && (
                               <div className={`flex items-center gap-1 mt-1 ${fromMe ? 'justify-end' : 'justify-start'}`}>
                                 <span className="text-[10px] text-white/20">{formatTime(m.created_at)}</span>
@@ -1510,49 +1502,37 @@ export default function ChatPage() {
                 })}
               </AnimatePresence>
 
-              {/* AI typing / generating voice indicator */}
+              {/* AI typing / voice indicator */}
               <AnimatePresence>
                 {(sending || generatingVoice) && (
                   <motion.div
-                    initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                    initial={{ opacity: 0, y: 6, scale: 0.97 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: 4 }}
                     transition={{ duration: 0.2 }}
                     className="flex justify-start mb-2"
                   >
-                    <div className="flex items-center gap-3 bg-white/[0.06] border border-white/[0.06] rounded-2xl rounded-tl-md px-4 py-3">
-                      {/* Avatar */}
+                    <div className="flex items-center gap-2.5 bg-white/[0.06] border border-white/[0.06] rounded-2xl rounded-tl-sm px-3.5 py-2.5">
                       {activeCharacter && (
-                        <div className={`w-7 h-7 rounded-full bg-gradient-to-br ${activeCharacter.gradient} flex items-center justify-center text-sm flex-shrink-0`}>
+                        <div className={`w-6 h-6 rounded-full bg-gradient-to-br ${activeCharacter.gradient} flex items-center justify-center text-xs flex-shrink-0`}>
                           {activeCharacter.avatar}
                         </div>
                       )}
                       {generatingVoice ? (
                         <div className="flex items-center gap-2">
-                          <div className="flex items-end gap-[3px]">
-                            {[6, 10, 8, 12, 7, 10, 6].map((h, i) => (
-                              <div
-                                key={i}
-                                className="w-[3px] rounded-full"
-                                style={{
-                                  backgroundColor: activeCharacter?.accentColor || '#10b981',
-                                  height: `${h}px`,
-                                  animation: 'pulse 0.7s ease-in-out infinite',
-                                  animationDelay: `${i * 80}ms`,
-                                }}
+                          <div className="flex items-end gap-[2px]">
+                            {[5, 8, 6, 10, 6, 8, 5].map((h, i) => (
+                              <div key={i} className="w-[2.5px] rounded-full"
+                                style={{ backgroundColor: activeCharacter?.accentColor || '#10b981', height: `${h}px`, animation: 'pulse 0.7s ease-in-out infinite', animationDelay: `${i * 80}ms` }}
                               />
                             ))}
                           </div>
-                          <span className="text-[11px] text-white/40 font-medium">
-                            {activeCharacter?.name} is speaking...
-                          </span>
+                          <span className="text-[11px] text-white/40">{activeCharacter?.name} speaking...</span>
                         </div>
                       ) : (
-                        <div className="flex gap-[5px] items-center">
+                        <div className="flex gap-[4px] items-center">
                           {[0, 150, 300].map((delay) => (
-                            <div
-                              key={delay}
-                              className="w-2 h-2 rounded-full bg-white/40 animate-bounce"
+                            <div key={delay} className="w-1.5 h-1.5 rounded-full bg-white/40 animate-bounce"
                               style={{ animationDelay: `${delay}ms`, animationDuration: '1s' }}
                             />
                           ))}
@@ -1564,56 +1544,35 @@ export default function ChatPage() {
               </AnimatePresence>
             </div>
 
-            {/* Input — hidden during live voice call */}
+            {/* ══════ INPUT BAR ══════ */}
             <div className={`border-t border-white/[0.06] bg-[#0f0f12] flex-shrink-0 ${inLiveCall ? 'hidden' : ''}`}>
 
               {/* Status banners */}
               <AnimatePresence>
                 {recording && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 'auto', opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.15 }}
-                    className="overflow-hidden"
-                  >
-                    <div className="flex items-center gap-3 px-4 py-2 bg-red-500/10 border-b border-red-500/20">
-                      {/* Animated recording dot */}
+                  <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
+                    <div className="flex items-center gap-2.5 px-4 py-2 bg-red-500/10 border-b border-red-500/20">
                       <div className="relative flex-shrink-0">
-                        <div className="w-2.5 h-2.5 rounded-full bg-red-400" />
+                        <div className="w-2 h-2 rounded-full bg-red-400" />
                         <div className="absolute inset-0 rounded-full bg-red-400 animate-ping opacity-60" />
                       </div>
                       <div className="flex items-end gap-[2px] flex-shrink-0">
-                        {[5, 8, 6, 10, 7].map((h, i) => (
-                          <div
-                            key={i}
-                            className="w-[2px] rounded-full bg-red-400 animate-pulse"
+                        {[4, 7, 5, 8, 6].map((h, i) => (
+                          <div key={i} className="w-[2px] rounded-full bg-red-400 animate-pulse"
                             style={{ height: `${h}px`, animationDelay: `${i * 100}ms`, animationDuration: '0.6s' }}
                           />
                         ))}
                       </div>
-                      <span className="text-xs text-red-400 font-medium flex-1">Recording... release mic to send</span>
-                      <button
-                        type="button"
-                        onClick={stopRecording}
-                        className="text-xs text-red-400/70 hover:text-red-400 underline transition-colors"
-                      >
-                        Cancel
-                      </button>
+                      <span className="text-xs text-red-400 font-medium flex-1 truncate">Recording...</span>
+                      <button type="button" onClick={stopRecording} className="text-xs text-red-400/70 hover:text-red-400 transition-colors flex-shrink-0">Cancel</button>
                     </div>
                   </motion.div>
                 )}
                 {uploading && !recording && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 'auto', opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.15 }}
-                    className="overflow-hidden"
-                  >
+                  <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
                     <div className="flex items-center gap-2 px-4 py-1.5 bg-white/[0.03] border-b border-white/[0.04]">
-                      <Loader2 className="w-3 h-3 animate-spin text-white/30" />
-                      <span className="text-xs text-white/30">Uploading file...</span>
+                      <Loader2 className="w-3 h-3 animate-spin text-white/30 flex-shrink-0" />
+                      <span className="text-xs text-white/30">Uploading...</span>
                     </div>
                   </motion.div>
                 )}
@@ -1621,13 +1580,13 @@ export default function ChatPage() {
 
               <div className="p-3">
                 <form onSubmit={sendMessage} className="flex items-center gap-2">
-                  {/* Attach file */}
+                  {/* Attach */}
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={recording}
-                    className="w-11 h-11 flex items-center justify-center rounded-xl hover:bg-white/[0.06] text-white/40 hover:text-white/70 disabled:opacity-30 transition-colors flex-shrink-0"
-                    title="Attach file (image, video, audio, document)"
+                    className="w-10 h-10 flex items-center justify-center rounded-xl hover:bg-white/[0.06] text-white/40 hover:text-white/70 disabled:opacity-30 transition-colors flex-shrink-0"
+                    title="Attach file"
                   >
                     <Paperclip className="w-5 h-5" />
                   </button>
@@ -1640,90 +1599,91 @@ export default function ChatPage() {
                   />
 
                   {/* Text input */}
-                  <div className="relative flex-1">
+                  <div className="relative flex-1 min-w-0">
                     <input
                       value={newMessage}
                       onChange={(e) => setNewMessage(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          sendMessage(e as any);
-                        }
+                        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(e as any); }
                       }}
                       placeholder={
-                        recording
-                          ? '🎙 Recording...'
-                          : voiceMode && activeCharacter
-                            ? `Message ${activeCharacter.name} (voice reply)`
-                            : 'Type a message...'
+                        recording ? 'Recording...'
+                          : voiceMode && activeCharacter ? `Message ${activeCharacter.name}...`
+                          : 'Type a message...'
                       }
                       disabled={recording}
-                      className="w-full bg-white/[0.06] border border-white/[0.08] rounded-xl pl-4 pr-4 py-3 text-sm focus:outline-none focus:border-emerald-500/30 focus:bg-white/[0.08] transition-all placeholder:text-white/20 disabled:opacity-50"
+                      className="w-full bg-white/[0.06] border border-white/[0.08] rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/30 focus:bg-white/[0.08] transition-all placeholder:text-white/20 disabled:opacity-50"
                     />
                     {voiceMode && activeCharacter && !recording && (
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2">
                         <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                       </div>
                     )}
                   </div>
 
-                  {/* Mic button — only show for AI chats */}
+                  {/* Mic (AI chats only) */}
                   {activeCharacter && (
                     <div className="relative flex-shrink-0">
-                      {/* Pulse ring while recording */}
-                      {recording && (
-                        <span className="absolute inset-0 rounded-xl bg-red-500 animate-ping opacity-30 pointer-events-none" />
-                      )}
+                      {recording && <span className="absolute inset-0 rounded-xl bg-red-500 animate-ping opacity-25 pointer-events-none" />}
                       <button
                         type="button"
                         onMouseDown={startRecording}
                         onMouseUp={stopRecording}
                         onTouchStart={(e) => { e.preventDefault(); startRecording(); }}
                         onTouchEnd={(e) => { e.preventDefault(); stopRecording(); }}
-                        aria-label={recording ? 'Release to send voice message' : 'Hold to record voice message'}
-                        title={recording ? 'Release to send voice message' : 'Hold to record voice message'}
-                        className={`w-11 h-11 flex items-center justify-center rounded-xl transition-all duration-150 active:scale-95 ${
+                        aria-label={recording ? 'Release to send' : 'Hold to record'}
+                        className={`w-10 h-10 flex items-center justify-center rounded-xl transition-all duration-150 active:scale-95 ${
                           recording
-                            ? 'bg-red-500 text-white shadow-[0_0_16px_rgba(239,68,68,0.4)]'
-                            : 'bg-white/[0.06] text-white/50 hover:text-white hover:bg-white/[0.1] border border-white/[0.08] hover:border-white/[0.15]'
+                            ? 'bg-red-500 text-white shadow-[0_0_14px_rgba(239,68,68,0.35)]'
+                            : 'bg-white/[0.06] text-white/50 hover:text-white hover:bg-white/[0.1] border border-white/[0.08]'
                         }`}
                       >
-                        {recording ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                        {recording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
                       </button>
                     </div>
                   )}
 
-                  {/* Send button */}
+                  {/* Send */}
                   <button
                     type="submit"
                     disabled={!newMessage.trim() || sending || generatingVoice || recording}
                     aria-label="Send message"
-                    className="w-11 h-11 flex items-center justify-center rounded-xl bg-emerald-500 text-black hover:bg-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-150 active:scale-95 flex-shrink-0 shadow-[0_2px_8px_rgba(52,211,153,0.2)]"
+                    className="w-10 h-10 flex items-center justify-center rounded-xl bg-emerald-500 text-black hover:bg-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-150 active:scale-95 flex-shrink-0 shadow-[0_2px_8px_rgba(52,211,153,0.2)]"
                   >
                     {sending || generatingVoice
-                      ? <Loader2 className="w-5 h-5 animate-spin" />
-                      : <Send className="w-4.5 h-4.5" />}
+                      ? <Loader2 className="w-4 h-4 animate-spin" />
+                      : <Send className="w-4 h-4" />}
                   </button>
                 </form>
               </div>
             </div>
           </>
         ) : (
-          /* Empty state */
-          <div className="flex-1 flex flex-col items-center justify-center bg-[#09090b]">
-            <div className="w-20 h-20 rounded-3xl bg-white/[0.04] border border-white/[0.06] flex items-center justify-center mb-6">
-              <MessageCircle className="w-10 h-10 text-white/10" />
+          /* ── Empty state ── */
+          <div className="flex-1 flex flex-col items-center justify-center bg-[#09090b] px-6">
+            {/* Show sidebar button on mobile when no chat selected */}
+            <button
+              className="md:hidden mb-6 flex items-center gap-2 px-4 py-2 rounded-xl bg-white/[0.04] border border-white/[0.06] text-white/40 hover:text-white hover:bg-white/[0.08] transition-colors text-sm"
+              onClick={() => setShowSidebar(true)}
+            >
+              <ArrowLeft className="w-4 h-4" /> Browse chats
+            </button>
+            <div className="w-16 h-16 rounded-3xl bg-white/[0.04] border border-white/[0.06] flex items-center justify-center mb-5">
+              <MessageCircle className="w-8 h-8 text-white/10" />
             </div>
-            <h2 className="text-xl font-semibold text-white/30 mb-2">Your messages</h2>
-            <p className="text-sm text-white/20 max-w-sm text-center mb-6">
-              Select a conversation, pick an AI character, or click on a user to start chatting.
+            <h2 className="text-lg font-semibold text-white/30 mb-2">Your messages</h2>
+            <p className="text-sm text-white/20 max-w-[280px] text-center mb-5">
+              Pick an AI character or a user to start chatting.
             </p>
-            <div className="flex flex-wrap gap-3 justify-center">
+            <div className="flex flex-wrap gap-2 justify-center">
               {AI_CHARACTERS.slice(0, 3).map((c) => (
-                <button key={c.id} onClick={() => startCharacterConversation(c)}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/[0.04] border border-white/[0.06] hover:bg-white/[0.08] transition-colors">
-                  <span className="text-lg">{c.avatar}</span>
-                  <span className="text-sm text-white/50">Chat with {c.name}</span>
+                <button
+                  key={c.id}
+                  onClick={() => startCharacterConversation(c)}
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/[0.04] border border-white/[0.06] hover:bg-white/[0.08] transition-colors"
+                >
+                  <span className="text-base">{c.avatar}</span>
+                  <span className="text-xs text-white/50">Chat with {c.name}</span>
                 </button>
               ))}
             </div>

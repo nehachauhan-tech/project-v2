@@ -2,9 +2,13 @@ import { GoogleGenAI, Modality } from '@google/genai';
 import { NextResponse } from 'next/server';
 import { CHARACTER_MAP } from '@/data/characters';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_CLOUD_API_KEY! });
+// authTokens.create requires v1alpha API version
+const ai = new GoogleGenAI({
+  apiKey: process.env.GOOGLE_CLOUD_API_KEY!,
+  httpOptions: { apiVersion: 'v1alpha' },
+});
 
-const LIVE_MODEL = 'gemini-3.1-flash-live-preview';
+const LIVE_MODEL = 'gemini-2.0-flash-live-preview-04-09';
 
 // Voice assigned to each character
 const CHARACTER_VOICES: Record<string, string> = {

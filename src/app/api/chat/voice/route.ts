@@ -3,7 +3,10 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { CHARACTER_MAP } from '@/data/characters';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_CLOUD_API_KEY! });
+const ai = new GoogleGenAI({
+  apiKey: process.env.GOOGLE_CLOUD_API_KEY!,
+  httpOptions: { apiVersion: 'v1beta' },
+});
 
 // Server-side Supabase client with service role for storage uploads
 const supabase = createClient(
@@ -11,7 +14,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-const LIVE_MODEL = 'gemini-3.1-flash-live-preview';
+const LIVE_MODEL = 'gemini-2.0-flash-live-preview-04-09';
 
 // Voice assigned to each character — user-specified mapping
 const CHARACTER_VOICES: Record<string, string> = {
