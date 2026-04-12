@@ -182,6 +182,8 @@ export default function ChatPage() {
   const [messages, setMessages]                 = useState<Message[]>([]);
   const [newMessage, setNewMessage]             = useState('');
   const [loading, setLoading]                   = useState(true);
+  // AbortController ref — lets us cancel in-flight AI requests when tab goes inactive
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [sending, setSending]                   = useState(false);
   const [searchQuery, setSearchQuery]           = useState('');
   const [showSidebar, setShowSidebar]           = useState(true);
@@ -477,10 +479,17 @@ export default function ChatPage() {
       }
     };
 
+    // Safety timeout — if bootstrap takes too long (network issues, etc.),
+    // force-clear the loading state so the user is never permanently stuck.
+    const safetyTimeout = setTimeout(() => {
+      if (mounted) setLoading(false);
+    }, 10000);
+
     bootstrap();
 
     return () => {
       mounted = false;
+      clearTimeout(safetyTimeout);
       presenceChannel?.unsubscribe();
       convChannel && supabase_client.removeChannel(convChannel);
       authSub?.unsubscribe();
@@ -524,6 +533,29 @@ export default function ChatPage() {
       }
     });
   }, [messages, sending]);
+
+  // ─── Visibility change: recover stuck states when tab regains focus ──
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        // If we were sending and the tab was backgrounded, the fetch likely timed out.
+        // Abort the in-flight request and reset the sending state.
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+          abortControllerRef.current = null;
+        }
+        setSending(false);
+        setGeneratingVoice(false);
+
+        // Re-fetch messages to reconcile any that arrived while backgrounded
+        if (activeConvRef.current) {
+          fetchMessages(activeConvRef.current.id);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [fetchMessages]);
 
   // ─── Start user-to-user conversation ─────────────────────
   const startConversation = async (otherUserId: string) => {
@@ -772,11 +804,15 @@ export default function ChatPage() {
       } else {
         // Text mode: get text reply
         setSending(true);
+        // Create an AbortController so we can cancel the request if the tab goes inactive
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
         try {
           const res = await fetch('/api/chat/ai', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ characterId: activeCharacter.id, message: content, history }),
+            signal: controller.signal,
           });
 
           if (!res.ok) throw new Error(`AI API ${res.status}`);
@@ -791,9 +827,11 @@ export default function ChatPage() {
               message_type:    'text',
             });
           }
-        } catch (err) {
-          console.error('AI error:', err);
+        } catch (err: any) {
+          // Don't log abort errors — they are intentional cancellations
+          if (err?.name !== 'AbortError') console.error('AI error:', err);
         } finally {
+          abortControllerRef.current = null;
           setSending(false);
         }
       }
@@ -1003,8 +1041,11 @@ export default function ChatPage() {
                   onClick={() => startCharacterConversation(c)}
                   className="flex flex-col items-center gap-1.5 min-w-[56px] group"
                 >
-                  <div className={`w-11 h-11 rounded-full ${c.color} flex items-center justify-center text-base shadow-lg group-hover:scale-110 transition-transform`}>
-                    {c.avatar}
+                  <div className={`w-11 h-11 rounded-full ${c.color} overflow-hidden flex items-center justify-center text-base shadow-lg group-hover:scale-110 transition-transform`}>
+                    {/* Show character profile image if available, fallback to emoji avatar */}
+                    {c.image
+                      ? <img src={c.image} alt={c.name} className="w-full h-full object-cover" />
+                      : c.avatar}
                   </div>
                   <span className="text-[10px] text-white/50 group-hover:text-white transition-colors truncate max-w-[56px]">
                     {c.name}
@@ -1037,7 +1078,9 @@ export default function ChatPage() {
                     <div className="relative flex-shrink-0">
                       <div className="w-10 h-10 rounded-full bg-white/[0.08] overflow-hidden flex items-center justify-center">
                         {character
-                          ? <span className="text-lg">{character.avatar}</span>
+                          ? (character.image
+                            ? <img src={character.image} alt={character.name} className="w-full h-full object-cover" />
+                            : <span className="text-lg">{character.avatar}</span>)
                           : avatarUrl
                             ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
                             : <User className="w-4 h-4 text-white/30" />}
@@ -1170,7 +1213,9 @@ export default function ChatPage() {
                 >
                   <div className={`w-9 h-9 rounded-full overflow-hidden flex items-center justify-center flex-shrink-0 ${activeCharacter ? `bg-gradient-to-br ${activeCharacter.gradient}` : 'bg-white/[0.08]'}`}>
                     {activeCharacter
-                      ? <span className="text-lg">{activeCharacter.avatar}</span>
+                      ? (activeCharacter.image
+                        ? <img src={activeCharacter.image} alt={activeCharacter.name} className="w-full h-full object-cover" />
+                        : <span className="text-lg">{activeCharacter.avatar}</span>)
                       : getOtherProfile(activeConversation)?.avatar_url
                         ? <img src={getOtherProfile(activeConversation)!.avatar_url} alt="" className="w-full h-full object-cover" />
                         : <User className="w-4 h-4 text-white/30" />}
@@ -1242,8 +1287,10 @@ export default function ChatPage() {
                   >
                     <div className="p-4 bg-white/[0.02]">
                       <div className="flex items-start gap-3">
-                        <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${activeCharacter.gradient} flex items-center justify-center text-2xl shadow-lg flex-shrink-0`}>
-                          {activeCharacter.avatar}
+                        <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${activeCharacter.gradient} overflow-hidden flex items-center justify-center text-2xl shadow-lg flex-shrink-0`}>
+                          {activeCharacter.image
+                            ? <img src={activeCharacter.image} alt={activeCharacter.name} className="w-full h-full object-cover" />
+                            : activeCharacter.avatar}
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-1">
@@ -1297,8 +1344,10 @@ export default function ChatPage() {
                         className={`absolute -inset-2 rounded-full transition-opacity duration-300 ${voiceCall.aiSpeaking ? 'opacity-60' : 'opacity-0'}`}
                         style={{ boxShadow: `0 0 30px ${activeCharacter.accentColor}40` }}
                       />
-                      <div className={`relative w-24 h-24 rounded-full bg-gradient-to-br ${activeCharacter.gradient} flex items-center justify-center text-4xl shadow-2xl`}>
-                        {activeCharacter.avatar}
+                      <div className={`relative w-24 h-24 rounded-full bg-gradient-to-br ${activeCharacter.gradient} overflow-hidden flex items-center justify-center text-4xl shadow-2xl`}>
+                        {activeCharacter.image
+                          ? <img src={activeCharacter.image} alt={activeCharacter.name} className="w-full h-full object-cover" />
+                          : activeCharacter.avatar}
                       </div>
                       {voiceCall.aiSpeaking && (
                         <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 flex items-end gap-[3px]">
@@ -1374,9 +1423,11 @@ export default function ChatPage() {
             >
               {messages.length === 0 && !sending && (
                 <div className="flex flex-col items-center justify-center h-full text-center px-4">
-                  <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${activeCharacter ? `bg-gradient-to-br ${activeCharacter.gradient}` : 'bg-white/[0.06]'}`}>
+                  <div className={`w-16 h-16 rounded-2xl overflow-hidden flex items-center justify-center mb-4 ${activeCharacter ? `bg-gradient-to-br ${activeCharacter.gradient}` : 'bg-white/[0.06]'}`}>
                     {activeCharacter
-                      ? <span className="text-3xl">{activeCharacter.avatar}</span>
+                      ? (activeCharacter.image
+                        ? <img src={activeCharacter.image} alt={activeCharacter.name} className="w-full h-full object-cover" />
+                        : <span className="text-3xl">{activeCharacter.avatar}</span>)
                       : <MessageCircle className="w-7 h-7 text-white/20" />}
                   </div>
                   <p className="font-semibold text-base mb-1">
@@ -1514,8 +1565,10 @@ export default function ChatPage() {
                   >
                     <div className="flex items-center gap-2.5 bg-white/[0.06] border border-white/[0.06] rounded-2xl rounded-tl-sm px-3.5 py-2.5">
                       {activeCharacter && (
-                        <div className={`w-6 h-6 rounded-full bg-gradient-to-br ${activeCharacter.gradient} flex items-center justify-center text-xs flex-shrink-0`}>
-                          {activeCharacter.avatar}
+                        <div className={`w-6 h-6 rounded-full bg-gradient-to-br ${activeCharacter.gradient} overflow-hidden flex items-center justify-center text-xs flex-shrink-0`}>
+                          {activeCharacter.image
+                            ? <img src={activeCharacter.image} alt={activeCharacter.name} className="w-full h-full object-cover" />
+                            : activeCharacter.avatar}
                         </div>
                       )}
                       {generatingVoice ? (
