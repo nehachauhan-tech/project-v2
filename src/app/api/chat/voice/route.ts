@@ -97,13 +97,15 @@ export async function POST(req: Request) {
     }
 
     const voiceName  = CHARACTER_VOICES[characterId] ?? 'Sulafat';
-    const systemText = character.systemPrompt + '\n\n' + moodContext;
 
-    // Build conversation history for context
-    const historyTurns = (history || []).map((h: any) => ({
-      role:  h.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: h.content }],
-    }));
+    // Build conversation history for context to avoid using sendClientContent (which requires complex config in 3.1)
+    const formattedHistory = (history || [])
+      .map((h: any) => `${h.role === 'assistant' ? character.name : 'User'}: ${h.content}`)
+      .join('\n\n');
+      
+    // Inject history directly into the system instruction for contextual awareness
+    const systemText = character.systemPrompt + '\n\n' + moodContext + 
+      (formattedHistory ? `\n\n=== RECENT CONVERSATION ===\n${formattedHistory}\n\n` : '');
 
     // ── Connect to Gemini Live API for real-time audio generation ──────────────
     const audioParts: string[] = [];
@@ -165,21 +167,11 @@ export async function POST(req: Request) {
           },
         },
       }).then((session) => {
-        // Send conversation history as context (without triggering a response)
-        if (historyTurns.length > 0) {
-          session.sendClientContent({
-            turns: historyTurns,
-            turnComplete: false,
-          });
-        }
+        // For Gemini 3.1 Flash Live, sendClientContent is restricted.
+        // We send the message using sendRealtimeInput which is built for incremental updates.
+        session.sendRealtimeInput({ text: message });
 
-        // Send the current user message and request a response
-        session.sendClientContent({
-          turns: [{ role: 'user', parts: [{ text: message }] }],
-          turnComplete: true,
-        });
-
-        // Close session once the turn completes
+        // We do not close the session immediately because we wait for turnComplete.
         turnComplete.then(() => {
           try { session.close(); } catch {}
         });
