@@ -19,21 +19,27 @@ export default function ProfileSetupPage() {
 
   useEffect(() => {
     const checkAuth = async () => {
-      const { data: { user } } = await supabase_client.auth.getUser();
-      if (!user) {
-        router.push('/login');
-        return;
-      }
-      setUserId(user.id);
+      try {
+        // Fast local check — no network needed
+        const { data: { session } } = await supabase_client.auth.getSession();
+        if (!session) {
+          router.push('/login');
+          return;
+        }
+        setUserId(session.user.id);
 
-      // If profile already exists, redirect to chat
-      const { data: profile } = await supabase_client
-        .from('project_v2_profiles')
-        .select('id')
-        .eq('id', user.id)
-        .single();
-      if (profile) {
-        router.push('/chat');
+        // If profile already exists, redirect to chat
+        const { data: profile } = await supabase_client
+          .from('project_v2_profiles')
+          .select('id')
+          .eq('id', session.user.id)
+          .single();
+        if (profile) {
+          router.push('/chat');
+        }
+      } catch (err) {
+        console.error('Profile setup auth error:', err);
+        router.push('/login');
       }
     };
     checkAuth();

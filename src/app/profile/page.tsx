@@ -25,23 +25,30 @@ export default function ProfilePage() {
 
   useEffect(() => {
     const load = async () => {
-      const { data: { user } } = await supabase_client.auth.getUser();
-      if (!user) { router.replace('/login'); return; }
+      try {
+        // Fast local check first
+        const { data: { session } } = await supabase_client.auth.getSession();
+        if (!session) { router.replace('/login'); return; }
 
-      const { data } = await supabase_client
-        .from('project_v2_profiles')
-        .select('*')
-        .eq('id', user.id)
-        .single();
+        const { data } = await supabase_client
+          .from('project_v2_profiles')
+          .select('*')
+          .eq('id', session.user.id)
+          .single();
 
-      if (!data) { router.replace('/profile/setup'); return; }
+        if (!data) { router.replace('/profile/setup'); return; }
 
-      setProfile(data);
-      setDisplayName(data.display_name);
-      setAge(data.age ? String(data.age) : '');
-      setBio(data.bio || '');
-      setAvatarPreview(data.avatar_url || null);
-      setPageLoading(false);
+        setProfile(data);
+        setDisplayName(data.display_name);
+        setAge(data.age ? String(data.age) : '');
+        setBio(data.bio || '');
+        setAvatarPreview(data.avatar_url || null);
+      } catch (err) {
+        console.error('Profile load error:', err);
+        router.replace('/login');
+      } finally {
+        setPageLoading(false);
+      }
     };
     load();
   }, [router]);

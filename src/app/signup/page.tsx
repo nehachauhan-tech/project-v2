@@ -19,13 +19,18 @@ export default function SignupPage() {
 
   // Redirect already-authenticated users
   useEffect(() => {
-    supabase_client.auth.getUser().then(({ data: { user } }) => {
-      if (user) {
-        router.replace('/chat');
-      } else {
+    // getSession() reads localStorage instantly (no network) — fast redirect for returning users
+    supabase_client.auth.getSession()
+      .then(({ data: { session } }) => {
+        if (session) {
+          router.replace('/chat');
+        } else {
+          setCheckingAuth(false);
+        }
+      })
+      .catch(() => {
         setCheckingAuth(false);
-      }
-    });
+      });
   }, [router]);
 
   const handleSignup = async (e: React.FormEvent) => {

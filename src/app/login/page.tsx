@@ -17,13 +17,19 @@ export default function LoginPage() {
 
   // Redirect already-authenticated users
   useEffect(() => {
-    supabase_client.auth.getUser().then(({ data: { user } }) => {
-      if (user) {
-        router.replace('/chat');
-      } else {
+    // getSession() reads localStorage instantly (no network) — fast redirect for returning users
+    supabase_client.auth.getSession()
+      .then(({ data: { session } }) => {
+        if (session) {
+          router.replace('/chat');
+        } else {
+          setCheckingAuth(false);
+        }
+      })
+      .catch(() => {
+        // Any error (storage unavailable, etc.) — just show the login form
         setCheckingAuth(false);
-      }
-    });
+      });
   }, [router]);
 
   const handleLogin = async (e: React.FormEvent) => {

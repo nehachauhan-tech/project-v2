@@ -303,16 +303,74 @@ export default function ChatPage() {
     let authSub: any          = null;
     let mounted               = true;
 
+    const PROFILE_CACHE_KEY = 'talkr-profile-cache';
+
     const bootstrap = async () => {
       try {
-        // Use getUser instead of getSession to avoid stale local tokens causing a redirect loop
-        const { data: { user: currentUser } } = await supabase_client.auth.getUser();
+        // ── Step 1: Register auth listener FIRST so no events are missed ──────
+        // This must happen before any async work. Only redirect on genuine
+        // SIGNED_OUT — ignore transient !session during TOKEN_REFRESHED.
+        const { data: { subscription } } = supabase_client.auth.onAuthStateChange(
+          (event, session) => {
+            if (!mounted) return;
+            if (event === 'SIGNED_OUT') {
+              // Clear profile cache on sign-out
+              try { localStorage.removeItem(PROFILE_CACHE_KEY); } catch {}
+              router.replace('/login');
+            }
+          }
+        );
+        authSub = subscription;
 
-        if (!currentUser) {
+        // ── Step 2: Fast local check via getSession() (reads localStorage, no network) ──
+        // This immediately tells us if a session exists without a round-trip.
+        const { data: { session: localSession } } = await supabase_client.auth.getSession();
+
+        if (!localSession) {
+          // No local session at all — send to login immediately
           router.replace('/login');
           return;
         }
 
+        // ── Step 3: Load profile from cache for instant UI render ─────────────
+        // Show the chat UI immediately using cached profile while server validates.
+        let cachedProfile: any = null;
+        try {
+          const raw = localStorage.getItem(PROFILE_CACHE_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            // Only use cache if it belongs to the same user
+            if (parsed?.id === localSession.user.id) {
+              cachedProfile = parsed;
+            }
+          }
+        } catch {}
+
+        if (cachedProfile && mounted) {
+          setUser(localSession.user);
+          setProfile(cachedProfile);
+          setLoading(false); // Unblock UI immediately with cached data
+        }
+
+        // ── Step 4: Server-validate the token (background, non-blocking) ──────
+        // getUser() hits Supabase to confirm the token is valid.
+        // If it fails we fall back to the local session (still usable for this session).
+        let currentUser = localSession.user;
+        try {
+          const { data: { user: serverUser } } = await supabase_client.auth.getUser();
+          if (!serverUser) {
+            if (mounted) router.replace('/login');
+            return;
+          }
+          currentUser = serverUser;
+        } catch (networkErr) {
+          // Network error — continue with local session; token is still valid locally
+          console.warn('Server user validation failed, using local session:', networkErr);
+        }
+
+        if (!mounted) return;
+
+        // ── Step 5: Fetch fresh profile from DB ───────────────────────────────
         const { data: prof } = await supabase_client
           .from('project_v2_profiles')
           .select('*')
@@ -320,15 +378,20 @@ export default function ChatPage() {
           .single();
 
         if (!prof) {
-          router.replace('/profile/setup');
+          if (mounted) router.replace('/profile/setup');
           return;
         }
 
         if (!mounted) return;
 
+        // Update cache and state with fresh profile
+        try { localStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify(prof)); } catch {}
+
         setUser(currentUser);
         setProfile(prof);
+        if (!cachedProfile) setLoading(false); // First load (no cache) — unblock now
 
+        // ── Step 6: Parallel data fetch ───────────────────────────────────────
         await Promise.all([
           fetchConversations(currentUser.id),
           supabase_client
@@ -339,7 +402,9 @@ export default function ChatPage() {
             .then(({ data }) => { if (data && mounted) setAllProfiles(data); }),
         ]);
 
-        // ── Presence ──
+        if (!mounted) return;
+
+        // ── Step 7: Realtime channels ─────────────────────────────────────────
         presenceChannel = supabase_client.channel('online_users', {
           config: { presence: { key: currentUser.id } },
         });
@@ -351,15 +416,14 @@ export default function ChatPage() {
           .subscribe(async (status: string) => {
             if (status === 'SUBSCRIBED') {
               await presenceChannel.track({
-                user_id: currentUser.id,
+                user_id:      currentUser.id,
                 display_name: prof.display_name,
-                avatar_url: prof.avatar_url,
-                online_at: new Date().toISOString(),
+                avatar_url:   prof.avatar_url,
+                online_at:    new Date().toISOString(),
               });
             }
           });
 
-        // ── Conversations realtime (sidebar updates) ──
         convChannel = supabase_client
           .channel('conv-changes')
           .on('postgres_changes', {
@@ -370,40 +434,24 @@ export default function ChatPage() {
             const uid = userRef.current?.id;
             if (!uid || !mounted) return;
 
-            // Merge updated conversation into state without full re-fetch
             if (payload.eventType === 'UPDATE') {
               const updated = payload.new as Conversation;
               setConversations((prev) =>
                 prev.map((c) => c.id === updated.id ? updated : c)
                     .sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime())
               );
-              // Also update activeConversation if it's the one that changed
               if (activeConvRef.current?.id === updated.id) {
                 setActiveConversation(updated);
               }
             } else {
-              // INSERT or DELETE — full refresh
               fetchConversations(uid);
             }
           })
           .subscribe();
 
-        // ── Auth state change handler ──
-        // Handles session expiry, token refresh, sign-out
-        const { data: { subscription } } = supabase_client.auth.onAuthStateChange(
-          (event, session) => {
-            if (!mounted) return;
-            if (event === 'SIGNED_OUT' || !session) {
-              router.replace('/login');
-            }
-          }
-        );
-        authSub = subscription;
-
-        if (mounted) setLoading(false);
       } catch (err) {
         console.error('Chat init error:', err);
-        // Always exit loading state even on error to prevent permanent spinner
+        // Always clear loading state to prevent permanent spinner
         if (mounted) setLoading(false);
       }
     };
