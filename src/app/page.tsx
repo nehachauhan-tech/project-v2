@@ -5,7 +5,7 @@ import { motion, useScroll, useTransform } from 'framer-motion';
 import Link from 'next/link';
 import {
   MessageCircle, Shield, Bot, Users, Sparkles, ArrowRight,
-  Zap, Globe, Image, FileText, Mic, Video, User, Settings
+  Zap, Globe, Image, FileText, Mic, Video, User
 } from 'lucide-react';
 import { supabase_client } from '@/lib/supabase_client';
 import { AI_CHARACTERS } from '@/data/characters';
@@ -42,7 +42,7 @@ const MEDIA_TYPES = [
 
 export default function LandingPage() {
   const [scrolled, setScrolled] = useState(false);
-  const [userProfile, setUserProfile] = useState<any>(null);
+  const [userProfile, setUserProfile] = useState<{ id: string; avatar_url?: string; display_name?: string } | null>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
   const { scrollYProgress } = useScroll();
   const heroOpacity = useTransform(scrollYProgress, [0, 0.15], [1, 0]);
@@ -54,14 +54,15 @@ export default function LandingPage() {
 
     const checkAuth = async () => {
       try {
-        const { data: { user } } = await supabase_client.auth.getUser();
-        if (user) {
+        // Use getSession() for instant local check (no network), then fetch profile
+        const { data: { session } } = await supabase_client.auth.getSession();
+        if (session?.user) {
           const { data: profile } = await supabase_client
             .from('project_v2_profiles')
             .select('*')
-            .eq('id', user.id)
+            .eq('id', session.user.id)
             .single();
-          setUserProfile(profile || { id: user.id });
+          setUserProfile(profile || { id: session.user.id });
         }
       } catch (err) {
         console.error('Error checking auth:', err);
@@ -319,8 +320,10 @@ export default function LandingPage() {
                   className="glass rounded-2xl p-6 hover:bg-white/[0.08] transition-all cursor-default"
                 >
                   <div className="flex items-center gap-4 mb-4">
-                    <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${c.gradient} flex items-center justify-center text-2xl shadow-lg flex-shrink-0`}>
-                      {c.avatar}
+                    <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${c.gradient} overflow-hidden flex items-center justify-center text-2xl shadow-lg flex-shrink-0`}>
+                      {c.image
+                        ? <img src={c.image} alt={c.name} className="w-full h-full object-cover" />
+                        : c.avatar}
                     </div>
                     <div>
                       <h3 className="text-lg font-bold">{c.name}</h3>

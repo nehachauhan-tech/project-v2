@@ -100,7 +100,7 @@ export async function POST(req: Request) {
 
     // Build conversation history for context to avoid using sendClientContent (which requires complex config in 3.1)
     const formattedHistory = (history || [])
-      .map((h: any) => `${h.role === 'assistant' ? character.name : 'User'}: ${h.content}`)
+      .map((h: { role: string; content: string }) => `${h.role === 'assistant' ? character.name : 'User'}: ${h.content}`)
       .join('\n\n');
       
     // Inject history directly into the system instruction for contextual awareness
@@ -221,10 +221,10 @@ export async function POST(req: Request) {
       characterId:  character.id,
       voiceName,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Voice Route Error:', error);
     return NextResponse.json(
-      { error: error.message || 'An unexpected error occurred.' },
+      { error: error instanceof Error ? error.message : 'An unexpected error occurred.' },
       { status: 500 }
     );
   }

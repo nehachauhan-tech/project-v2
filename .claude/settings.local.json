@@ -24,7 +24,10 @@
       "Bash(npx tsc:*)",
       "Bash(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/chat)",
       "Bash(kill %1)",
-      "Bash(pkill -f \"next dev\")"
+      "Bash(pkill -f \"next dev\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/chat)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/login)"
     ]
   }
 }

@@ -40,7 +40,7 @@ export async function POST(req: Request) {
     const systemInstruction = character.systemPrompt + '\n\n' + moodContext;
 
     // Build conversation history in the format expected by the API
-    const formattedHistory = (history || []).map((h: any) => ({
+    const formattedHistory = (history || []).map((h: { role: string; content: string }) => ({
       role: h.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: h.content }],
     }));
@@ -93,10 +93,10 @@ export async function POST(req: Request) {
       character: character.name,
       characterId: character.id,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('AI Route Error:', error);
     return NextResponse.json(
-      { error: error.message || 'An unexpected error occurred.' },
+      { error: error instanceof Error ? error.message : 'An unexpected error occurred.' },
       { status: 500 }
     );
   }

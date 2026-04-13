@@ -13,6 +13,7 @@ import { supabase_client } from '@/lib/supabase_client';
 import { useRouter } from 'next/navigation';
 import { AI_CHARACTERS, CHARACTER_MAP, type AICharacter } from '@/data/characters';
 import type { Profile, Conversation, Message, OnlineUser, MessageType } from '@/types';
+import type { User as SupabaseUser, RealtimeChannel } from '@supabase/supabase-js';
 import { useVoiceCall } from '@/hooks/useVoiceCall';
 
 const ACCEPT_TYPES: Record<string, MessageType> = {
@@ -44,10 +45,11 @@ function formatDate(dateStr: string) {
 
 // ─── Audio Player (voice message bubbles) ──────────────────
 function AudioPlayer({ src, isOwn, accentColor }: { src: string; isOwn: boolean; accentColor?: string }) {
-  const [playing, setPlaying]   = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [loading, setLoading]   = useState(true);
+  const [playing, setPlaying]       = useState(false);
+  const [progress, setProgress]     = useState(0);
+  const [duration, setDuration]     = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [loading, setLoading]       = useState(true);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const color = accentColor || '#10b981';
@@ -78,6 +80,7 @@ function AudioPlayer({ src, isOwn, accentColor }: { src: string; isOwn: boolean;
         onTimeUpdate={(e) => {
           const el = e.currentTarget;
           setProgress(el.duration ? el.currentTime / el.duration : 0);
+          setCurrentTime(el.currentTime);
         }}
         onEnded={() => { setPlaying(false); setProgress(0); }}
       />
@@ -130,7 +133,7 @@ function AudioPlayer({ src, isOwn, accentColor }: { src: string; isOwn: boolean;
 
         {/* Duration */}
         <p className="text-[10px] mt-0.5" style={{ color: isOwn ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.3)' }}>
-          {fmt(audioRef.current?.currentTime ?? 0)} / {duration ? fmt(duration) : '--:--'}
+          {fmt(currentTime)} / {duration ? fmt(duration) : '--:--'}
         </p>
       </div>
 
@@ -172,7 +175,7 @@ function MusicPlayer({ mood, accentColor }: { mood: string; accentColor: string 
 
 // ─── Main Page ───────────────────────────────────────────────
 export default function ChatPage() {
-  const [user, setUser]                         = useState<any>(null);
+  const [user, setUser]                         = useState<SupabaseUser | null>(null);
   const [profile, setProfile]                   = useState<Profile | null>(null);
   const [conversations, setConversations]       = useState<Conversation[]>([]);
   const [onlineUsers, setOnlineUsers]           = useState<OnlineUser[]>([]);
@@ -200,9 +203,9 @@ export default function ChatPage() {
   const router              = useRouter();
 
   // Stable refs — let realtime callbacks always see current values without stale closures
-  const userRef             = useRef<any>(null);
+  const userRef             = useRef<SupabaseUser | null>(null);
   const activeConvRef       = useRef<Conversation | null>(null);
-  const msgSubRef           = useRef<any>(null);   // current messages subscription
+  const msgSubRef           = useRef<RealtimeChannel | null>(null);
 
   userRef.current         = user;
   activeConvRef.current   = activeConversation;
@@ -211,7 +214,7 @@ export default function ChatPage() {
   const [inLiveCall, setInLiveCall] = useState(false);
   const voiceCall = useVoiceCall({
     characterId: activeCharacter?.id ?? '',
-    onTranscript: useCallback((role: 'user' | 'assistant', text: string) => {
+    onTranscript: useCallback((_role: 'user' | 'assistant', _text: string) => {
       // Optionally capture transcripts — can be saved to DB later
     }, []),
   });
@@ -241,7 +244,6 @@ export default function ChatPage() {
       // Merge: keep any optimistic (temp-*) messages that aren't yet in the DB result,
       // but don't re-add messages that arrived via realtime already.
       setMessages((prev) => {
-        const realIds = new Set(data.map((m) => m.id));
         const pendingTemps = prev.filter((m) => m.id.startsWith('temp-'));
         // Remove temps that have a real counterpart in the DB fetch (by content+sender+role)
         const stillPending = pendingTemps.filter((t) =>
@@ -321,9 +323,9 @@ export default function ChatPage() {
 
   // ─── Auth + Init ─────────────────────────────────────────
   useEffect(() => {
-    let presenceChannel: any  = null;
-    let convChannel: any      = null;
-    let authSub: any          = null;
+    let presenceChannel: RealtimeChannel | null  = null;
+    let convChannel: RealtimeChannel | null      = null;
+    let authSub: { unsubscribe: () => void } | null = null;
     let mounted               = true;
 
     const PROFILE_CACHE_KEY = 'talkr-profile-cache';
@@ -334,7 +336,7 @@ export default function ChatPage() {
         // This must happen before any async work. Only redirect on genuine
         // SIGNED_OUT — ignore transient !session during TOKEN_REFRESHED.
         const { data: { subscription } } = supabase_client.auth.onAuthStateChange(
-          (event, session) => {
+          (event) => {
             if (!mounted) return;
             if (event === 'SIGNED_OUT') {
               // Clear profile cache on sign-out
@@ -357,7 +359,7 @@ export default function ChatPage() {
 
         // ── Step 3: Load profile from cache for instant UI render ─────────────
         // Show the chat UI immediately using cached profile while server validates.
-        let cachedProfile: any = null;
+        let cachedProfile: Profile | null = null;
         try {
           const raw = localStorage.getItem(PROFILE_CACHE_KEY);
           if (raw) {
@@ -433,12 +435,12 @@ export default function ChatPage() {
         });
         presenceChannel
           .on('presence', { event: 'sync' }, () => {
-            const state = presenceChannel.presenceState();
-            if (mounted) setOnlineUsers(Object.values(state).flat() as OnlineUser[]);
+            const state = presenceChannel!.presenceState();
+            if (mounted) setOnlineUsers(Object.values(state).flat() as unknown as OnlineUser[]);
           })
           .subscribe(async (status: string) => {
             if (status === 'SUBSCRIBED') {
-              await presenceChannel.track({
+              await presenceChannel!.track({
                 user_id:      currentUser.id,
                 display_name: prof.display_name,
                 avatar_url:   prof.avatar_url,
@@ -491,7 +493,7 @@ export default function ChatPage() {
       mounted = false;
       clearTimeout(safetyTimeout);
       presenceChannel?.unsubscribe();
-      convChannel && supabase_client.removeChannel(convChannel);
+      if (convChannel) supabase_client.removeChannel(convChannel);
       authSub?.unsubscribe();
       if (msgSubRef.current) {
         supabase_client.removeChannel(msgSubRef.current);
@@ -827,9 +829,9 @@ export default function ChatPage() {
               message_type:    'text',
             });
           }
-        } catch (err: any) {
+        } catch (err: unknown) {
           // Don't log abort errors — they are intentional cancellations
-          if (err?.name !== 'AbortError') console.error('AI error:', err);
+          if (err instanceof Error && err.name !== 'AbortError') console.error('AI error:', err);
         } finally {
           abortControllerRef.current = null;
           setSending(false);
@@ -1657,7 +1659,7 @@ export default function ChatPage() {
                       value={newMessage}
                       onChange={(e) => setNewMessage(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(e as any); }
+                        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(e as unknown as React.FormEvent); }
                       }}
                       placeholder={
                         recording ? 'Recording...'

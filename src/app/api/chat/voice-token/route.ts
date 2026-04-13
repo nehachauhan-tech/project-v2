@@ -1,4 +1,4 @@
-import { GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI, Modality, MediaResolution } from '@google/genai';
 import { NextResponse } from 'next/server';
 import { CHARACTER_MAP } from '@/data/characters';
 
@@ -8,7 +8,7 @@ const ai = new GoogleGenAI({
   httpOptions: { apiVersion: 'v1alpha' },
 });
 
-const LIVE_MODEL = 'gemini-2.0-flash-live-preview-04-09';
+const LIVE_MODEL = 'models/gemini-3.1-flash-live-preview';
 
 // Voice assigned to each character
 const CHARACTER_VOICES: Record<string, string> = {
@@ -58,12 +58,17 @@ export async function POST(req: Request) {
           model: LIVE_MODEL,
           config: {
             responseModalities: [Modality.AUDIO],
+            mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
             speechConfig: {
               voiceConfig: {
                 prebuiltVoiceConfig: { voiceName },
               },
             },
             systemInstruction: { parts: [{ text: systemText }] },
+            contextWindowCompression: {
+              triggerTokens: '104857',
+              slidingWindow: { targetTokens: '52428' },
+            },
           },
         },
       },
@@ -76,10 +81,10 @@ export async function POST(req: Request) {
       characterId: character.id,
       character:   character.name,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Voice Token Error:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to create voice token' },
+      { error: error instanceof Error ? error.message : 'Failed to create voice token' },
       { status: 500 }
     );
   }

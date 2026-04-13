@@ -5,7 +5,7 @@ import { motion } from 'framer-motion';
 
 interface Props {
   currentTheme: string;
-  onThemeChange: (theme: any) => void;
+  onThemeChange: (theme: string) => void;
   themes: { id: string; name: string; color: string }[];
 }
 
