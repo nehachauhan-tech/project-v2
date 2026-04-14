@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase_client } from '@/lib/supabase_client';
 import { Loader2 } from 'lucide-react';
@@ -9,57 +9,59 @@ function AuthCallbackInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [error, setError] = useState('');
+  const handled = useRef(false);
 
   useEffect(() => {
-    const handleCallback = async () => {
-      const code = searchParams.get('code');
-      const next = searchParams.get('next');
+    // Prevent double-fire in React strict mode
+    if (handled.current) return;
+    handled.current = true;
 
-      if (code) {
-        // Explicitly exchange the PKCE code for a session.
-        // The browser client has the code_verifier in localStorage.
-        const { data, error: exchangeError } = await supabase_client.auth.exchangeCodeForSession(code);
+    const next = searchParams.get('next');
 
-        if (exchangeError || !data.session) {
-          setError(exchangeError?.message ?? 'Failed to sign in. Please try again.');
-          return;
-        }
-
-        await redirectUser(data.session.user.id, next);
-        return;
-      }
-
-      // No code param — check if there's already a session (e.g. email verification)
-      const { data: { session } } = await supabase_client.auth.getSession();
-      if (session) {
-        await redirectUser(session.user.id, next);
-        return;
-      }
-
-      setError('Authentication failed. Please try again.');
-    };
-
-    const redirectUser = async (userId: string, next: string | null) => {
+    const redirectUser = async (userId: string) => {
       if (next) {
         router.replace(next);
         return;
       }
 
-      // Check if user has a profile
       const { data: profile } = await supabase_client
         .from('project_v2_profiles')
         .select('id')
         .eq('id', userId)
         .single();
 
-      if (!profile) {
-        router.replace('/profile/setup');
-      } else {
-        router.replace('/chat');
-      }
+      router.replace(profile ? '/chat' : '/profile/setup');
     };
 
-    handleCallback();
+    // With implicit flow, the Supabase client auto-detects the hash fragment
+    // (#access_token=...) and establishes the session. We listen for that event.
+    const { data: { subscription } } = supabase_client.auth.onAuthStateChange(
+      async (event, session) => {
+        if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && session) {
+          subscription.unsubscribe();
+          await redirectUser(session.user.id);
+        }
+      }
+    );
+
+    // Also check if a session already exists (e.g. hash was already parsed)
+    supabase_client.auth.getSession().then(({ data: { session } }) => {
+      if (session) {
+        subscription.unsubscribe();
+        redirectUser(session.user.id);
+      }
+    });
+
+    // Timeout fallback
+    const timeout = setTimeout(() => {
+      subscription.unsubscribe();
+      setError('Authentication timed out. Please try again.');
+    }, 15000);
+
+    return () => {
+      clearTimeout(timeout);
+      subscription.unsubscribe();
+    };
   }, [router, searchParams]);
 
   if (error) {
