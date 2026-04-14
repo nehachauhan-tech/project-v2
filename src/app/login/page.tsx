@@ -5,6 +5,7 @@ import { supabase_client } from '@/lib/supabase_client';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { MessageCircle, Mail, Lock, ArrowRight, Loader2, Eye, EyeOff } from 'lucide-react';
+import { FcGoogle } from 'react-icons/fc';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -13,6 +14,7 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const router = useRouter();
 
   // Redirect already-authenticated users
@@ -64,6 +66,23 @@ export default function LoginPage() {
       }
     } else {
       setLoading(false);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    setError('');
+    setGoogleLoading(true);
+
+    const { error: authError } = await supabase_client.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: `${window.location.origin}/auth/callback`,
+      },
+    });
+
+    if (authError) {
+      setError(authError.message);
+      setGoogleLoading(false);
     }
   };
 
@@ -127,6 +146,28 @@ export default function LoginPage() {
               {error}
             </div>
           )}
+
+          <button
+            type="button"
+            onClick={handleGoogleLogin}
+            disabled={googleLoading || loading}
+            className="w-full flex items-center justify-center gap-3 bg-white/[0.06] border border-white/[0.1] rounded-xl py-3.5 text-sm font-medium hover:bg-white/[0.1] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {googleLoading ? (
+              <Loader2 className="w-5 h-5 animate-spin" />
+            ) : (
+              <>
+                <FcGoogle className="w-5 h-5" />
+                Continue with Google
+              </>
+            )}
+          </button>
+
+          <div className="flex items-center gap-3 my-2">
+            <div className="flex-1 h-px bg-white/[0.1]" />
+            <span className="text-xs text-white/30 uppercase tracking-wider">or</span>
+            <div className="flex-1 h-px bg-white/[0.1]" />
+          </div>
 
           <form onSubmit={handleLogin} className="space-y-5">
             <div>
