@@ -12,33 +12,31 @@ function AuthCallbackInner() {
 
   useEffect(() => {
     const handleCallback = async () => {
+      const code = searchParams.get('code');
       const next = searchParams.get('next');
 
-      // The Supabase client (with detectSessionInUrl: true and flowType: 'pkce')
-      // automatically picks up the ?code= param and exchanges it using the
-      // code verifier stored in localStorage. We just need to wait for the session.
-      const { data: { session }, error: sessionError } = await supabase_client.auth.getSession();
+      if (code) {
+        // Explicitly exchange the PKCE code for a session.
+        // The browser client has the code_verifier in localStorage.
+        const { data, error: exchangeError } = await supabase_client.auth.exchangeCodeForSession(code);
 
-      if (sessionError || !session) {
-        // If getSession didn't pick it up yet, listen for the auth state change
-        const { data: { subscription } } = supabase_client.auth.onAuthStateChange(
-          async (event, newSession) => {
-            if (event === 'SIGNED_IN' && newSession) {
-              subscription.unsubscribe();
-              await redirectUser(newSession.user.id, next);
-            }
-          }
-        );
+        if (exchangeError || !data.session) {
+          setError(exchangeError?.message ?? 'Failed to sign in. Please try again.');
+          return;
+        }
 
-        // Give it a few seconds, then fail
-        setTimeout(() => {
-          subscription.unsubscribe();
-          setError('Authentication timed out. Please try again.');
-        }, 10000);
+        await redirectUser(data.session.user.id, next);
         return;
       }
 
-      await redirectUser(session.user.id, next);
+      // No code param — check if there's already a session (e.g. email verification)
+      const { data: { session } } = await supabase_client.auth.getSession();
+      if (session) {
+        await redirectUser(session.user.id, next);
+        return;
+      }
+
+      setError('Authentication failed. Please try again.');
     };
 
     const redirectUser = async (userId: string, next: string | null) => {
