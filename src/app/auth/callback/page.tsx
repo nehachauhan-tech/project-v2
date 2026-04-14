@@ -1,75 +1,69 @@
 'use client';
 
-import { Suspense, useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase_client } from '@/lib/supabase_client';
 import { Loader2 } from 'lucide-react';
+
+// Module-level flag prevents double-exchange in React strict mode.
+// The PKCE code is single-use — exchanging it twice causes the second call to fail.
+let exchangeInProgress = false;
 
 function AuthCallbackInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [error, setError] = useState('');
-  const handled = useRef(false);
 
   useEffect(() => {
-    // Prevent double-fire in React strict mode
-    if (handled.current) return;
-    handled.current = true;
+    if (exchangeInProgress) return;
+    exchangeInProgress = true;
 
-    const next = searchParams.get('next');
+    const run = async () => {
+      const code = searchParams.get('code');
+      const next = searchParams.get('next') ?? null;
 
-    const redirectUser = async (userId: string) => {
-      if (next) {
-        router.replace(next);
+      const redirectUser = async (userId: string) => {
+        if (next) { router.replace(next); return; }
+        const { data: profile } = await supabase_client
+          .from('project_v2_profiles')
+          .select('id')
+          .eq('id', userId)
+          .single();
+        router.replace(profile ? '/chat' : '/profile/setup');
+      };
+
+      if (code) {
+        const { data, error: err } = await supabase_client.auth.exchangeCodeForSession(code);
+        if (err || !data.session) {
+          exchangeInProgress = false;
+          setError(err?.message ?? 'Sign-in failed. Please try again.');
+          return;
+        }
+        await redirectUser(data.session.user.id);
         return;
       }
 
-      const { data: profile } = await supabase_client
-        .from('project_v2_profiles')
-        .select('id')
-        .eq('id', userId)
-        .single();
-
-      router.replace(profile ? '/chat' : '/profile/setup');
-    };
-
-    // With implicit flow, the Supabase client auto-detects the hash fragment
-    // (#access_token=...) and establishes the session. We listen for that event.
-    const { data: { subscription } } = supabase_client.auth.onAuthStateChange(
-      async (event, session) => {
-        if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && session) {
-          subscription.unsubscribe();
-          await redirectUser(session.user.id);
-        }
-      }
-    );
-
-    // Also check if a session already exists (e.g. hash was already parsed)
-    supabase_client.auth.getSession().then(({ data: { session } }) => {
+      // No code — check for an existing session (e.g. coming back after email verify)
+      const { data: { session } } = await supabase_client.auth.getSession();
       if (session) {
-        subscription.unsubscribe();
-        redirectUser(session.user.id);
+        await redirectUser(session.user.id);
+        return;
       }
-    });
 
-    // Timeout fallback
-    const timeout = setTimeout(() => {
-      subscription.unsubscribe();
-      setError('Authentication timed out. Please try again.');
-    }, 15000);
-
-    return () => {
-      clearTimeout(timeout);
-      subscription.unsubscribe();
+      exchangeInProgress = false;
+      setError('No authentication code found. Please try again.');
     };
-  }, [router, searchParams]);
+
+    run();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (error) {
     return (
       <div className="min-h-screen bg-[#09090b] flex flex-col items-center justify-center gap-4">
         <p className="text-red-400 text-sm">{error}</p>
         <button
-          onClick={() => router.replace('/login')}
+          onClick={() => { exchangeInProgress = false; router.replace('/login'); }}
           className="text-emerald-400 hover:text-emerald-300 text-sm font-medium transition-colors"
         >
           Back to login

@@ -12,7 +12,7 @@ export const supabase_client = createClient(supabase_url, supabase_anon_key, {
     persistSession:    true,
     autoRefreshToken:  true,
     detectSessionInUrl: true,
-    flowType:          'implicit',             // OAuth returns tokens in hash fragment, handled client-side
+    flowType:          'pkce',                 // PKCE: Supabase sends ?code= to callback, exchanged client-side
     storageKey:        'talkr-auth-token',    // stable key across deploys
   },
 });
