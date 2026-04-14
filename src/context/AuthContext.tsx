@@ -21,6 +21,24 @@ const AuthContext = createContext<AuthContextValue>({
   refreshProfile: async () => {},
 });
 
+// Module-level promise ensures PKCE code exchange only runs once,
+// even when React Strict Mode double-mounts the provider.
+let codeExchangePromise: Promise<void> | null = null;
+
+function exchangeCodeOnce() {
+  if (codeExchangePromise) return codeExchangePromise;
+
+  codeExchangePromise = (async () => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    if (code && window.location.pathname === '/auth/callback') {
+      await supabase_client.auth.exchangeCodeForSession(code);
+    }
+  })();
+
+  return codeExchangePromise;
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -41,18 +59,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   useEffect(() => {
+    let mounted = true;
+
     const init = async () => {
+      // Wait for PKCE exchange if on callback page (runs only once at module level)
+      await exchangeCodeOnce();
+
       const { data: { session } } = await supabase_client.auth.getSession();
-      if (session?.user) {
+      if (session?.user && mounted) {
         setUser(session.user);
         await fetchProfile(session.user.id);
       }
-      setLoading(false);
+      if (mounted) setLoading(false);
     };
     init();
 
     const { data: { subscription } } = supabase_client.auth.onAuthStateChange(
       async (event, session) => {
+        if (!mounted) return;
         if (session?.user) {
           setUser(session.user);
           await fetchProfile(session.user.id);
@@ -64,7 +88,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     );
 
-    return () => subscription.unsubscribe();
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   const signOut = async () => {

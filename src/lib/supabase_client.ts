@@ -6,12 +6,12 @@ const supabase_anon_key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 // Single shared browser client.
 // - persistSession: true  — saves JWT to localStorage so reloads don't re-authenticate
 // - autoRefreshToken: true — SDK proactively refreshes the JWT before it expires
-// - detectSessionInUrl: true — handles email-verification / OAuth redirect fragments
+// - detectSessionInUrl: false — we handle PKCE code exchange manually in /auth/callback
 export const supabase_client = createClient(supabase_url, supabase_anon_key, {
   auth: {
     persistSession:    true,
     autoRefreshToken:  true,
-    detectSessionInUrl: true,
+    detectSessionInUrl: false,
     flowType:          'pkce',                 // PKCE: Supabase sends ?code= to callback, exchanged client-side
     storageKey:        'talkr-auth-token',    // stable key across deploys
   },

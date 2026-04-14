@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase_client } from '@/lib/supabase_client';
 import { useRouter } from 'next/navigation';
+import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 import { MessageCircle, Mail, Lock, ArrowRight, Loader2, Eye, EyeOff, CheckCircle2 } from 'lucide-react';
 import { FcGoogle } from 'react-icons/fc';
@@ -15,25 +16,18 @@ export default function SignupPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
-  const [checkingAuth, setCheckingAuth] = useState(true);
   const [googleLoading, setGoogleLoading] = useState(false);
   const router = useRouter();
+  const { user, loading: authLoading } = useAuth();
 
-  // Redirect already-authenticated users
+  // Redirect already-authenticated users via AuthContext (no extra lock contention)
   useEffect(() => {
-    // getSession() reads localStorage instantly (no network) — fast redirect for returning users
-    supabase_client.auth.getSession()
-      .then(({ data: { session } }) => {
-        if (session) {
-          router.replace('/chat');
-        } else {
-          setCheckingAuth(false);
-        }
-      })
-      .catch(() => {
-        setCheckingAuth(false);
-      });
-  }, [router]);
+    if (!authLoading && user) {
+      router.replace('/chat');
+    }
+  }, [authLoading, user, router]);
+
+  const checkingAuth = authLoading || !!user;
 
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();

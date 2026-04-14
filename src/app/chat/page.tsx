@@ -333,13 +333,10 @@ export default function ChatPage() {
     const bootstrap = async () => {
       try {
         // ── Step 1: Register auth listener FIRST so no events are missed ──────
-        // This must happen before any async work. Only redirect on genuine
-        // SIGNED_OUT — ignore transient !session during TOKEN_REFRESHED.
         const { data: { subscription } } = supabase_client.auth.onAuthStateChange(
           (event) => {
             if (!mounted) return;
             if (event === 'SIGNED_OUT') {
-              // Clear profile cache on sign-out
               try { localStorage.removeItem(PROFILE_CACHE_KEY); } catch {}
               router.replace('/login');
             }
@@ -347,12 +344,10 @@ export default function ChatPage() {
         );
         authSub = subscription;
 
-        // ── Step 2: Fast local check via getSession() (reads localStorage, no network) ──
-        // This immediately tells us if a session exists without a round-trip.
+        // ── Step 2: Fast local check via getSession() ────────────────────
         const { data: { session: localSession } } = await supabase_client.auth.getSession();
 
         if (!localSession) {
-          // No local session at all — send to login immediately
           router.replace('/login');
           return;
         }

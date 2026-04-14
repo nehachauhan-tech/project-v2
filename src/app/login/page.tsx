@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase_client } from '@/lib/supabase_client';
 import { useRouter } from 'next/navigation';
+import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 import { MessageCircle, Mail, Lock, ArrowRight, Loader2, Eye, EyeOff } from 'lucide-react';
 import { FcGoogle } from 'react-icons/fc';
@@ -13,26 +14,18 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [checkingAuth, setCheckingAuth] = useState(true);
   const [googleLoading, setGoogleLoading] = useState(false);
   const router = useRouter();
+  const { user, loading: authLoading } = useAuth();
 
-  // Redirect already-authenticated users
+  // Redirect already-authenticated users via AuthContext (no extra lock contention)
   useEffect(() => {
-    // getSession() reads localStorage instantly (no network) — fast redirect for returning users
-    supabase_client.auth.getSession()
-      .then(({ data: { session } }) => {
-        if (session) {
-          router.replace('/chat');
-        } else {
-          setCheckingAuth(false);
-        }
-      })
-      .catch(() => {
-        // Any error (storage unavailable, etc.) — just show the login form
-        setCheckingAuth(false);
-      });
-  }, [router]);
+    if (!authLoading && user) {
+      router.replace('/chat');
+    }
+  }, [authLoading, user, router]);
+
+  const checkingAuth = authLoading || !!user;
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -51,12 +44,12 @@ export default function LoginPage() {
     }
 
     // Check if profile exists
-    const { data: { user } } = await supabase_client.auth.getUser();
-    if (user) {
+    const { data: { user: loggedInUser } } = await supabase_client.auth.getUser();
+    if (loggedInUser) {
       const { data: profile } = await supabase_client
         .from('project_v2_profiles')
         .select('id')
-        .eq('id', user.id)
+        .eq('id', loggedInUser.id)
         .single();
 
       if (!profile) {
