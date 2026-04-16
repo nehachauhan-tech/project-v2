@@ -151,7 +151,7 @@ export default function ProfilePage() {
               <div className="w-8 h-8 rounded-lg bg-emerald-500 flex items-center justify-center">
                 <MessageCircle className="w-4 h-4 text-black" strokeWidth={2.5} />
               </div>
-              <span className="font-bold">Talkr</span>
+              <span className="font-bold">Hirecheck</span>
             </div>
           </div>
           <button
@@ -166,7 +166,7 @@ export default function ProfilePage() {
 
       <div className="relative z-10 max-w-2xl mx-auto px-6 py-10">
         <h1 className="text-2xl font-bold mb-1">Your Profile</h1>
-        <p className="text-white/40 text-sm mb-8">Update how others see you on Talkr.</p>
+        <p className="text-white/40 text-sm mb-8">Update how others see you on Hirecheck.</p>
 
         {error && (
           <div className="bg-red-500/10 border border-red-500/20 text-red-400 text-sm rounded-xl px-4 py-3 mb-6">

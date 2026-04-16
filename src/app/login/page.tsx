@@ -98,7 +98,7 @@ export default function LoginPage() {
           <div className="w-9 h-9 rounded-xl bg-emerald-500 flex items-center justify-center">
             <MessageCircle className="w-5 h-5 text-black" strokeWidth={2.5} />
           </div>
-          <span className="text-lg font-bold">Talkr</span>
+          <span className="text-lg font-bold">Hirecheck</span>
         </Link>
 
         <div className="relative">
@@ -111,7 +111,7 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <p className="relative text-sm text-white/20">&copy; 2026 Talkr</p>
+        <p className="relative text-sm text-white/20">&copy; 2026 Hirecheck</p>
       </div>
 
       {/* Right: Form */}
@@ -122,7 +122,7 @@ export default function LoginPage() {
               <div className="w-9 h-9 rounded-xl bg-emerald-500 flex items-center justify-center">
                 <MessageCircle className="w-5 h-5 text-black" strokeWidth={2.5} />
               </div>
-              <span className="text-lg font-bold">Talkr</span>
+              <span className="text-lg font-bold">Hirecheck</span>
             </Link>
           </div>
 

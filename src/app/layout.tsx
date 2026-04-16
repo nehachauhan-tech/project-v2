@@ -10,7 +10,7 @@ const plusJakartaSans = Plus_Jakarta_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "Talkr - Anonymous AI & Real Chat",
+  title: "Hirecheck",
   description:
     "Chat anonymously with AI roleplay characters or real people online. No identity required.",
 };
