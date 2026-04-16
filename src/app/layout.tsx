@@ -10,7 +10,7 @@ const plusJakartaSans = Plus_Jakarta_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "Hirecheck",
+  title: "Talker",
   description:
     "Chat anonymously with AI roleplay characters or real people online. No identity required.",
 };

@@ -13,7 +13,7 @@ export const supabase_client = createClient(supabase_url, supabase_anon_key, {
     autoRefreshToken:  true,
     detectSessionInUrl: false,
     flowType:          'pkce',                 // PKCE: Supabase sends ?code= to callback, exchanged client-side
-    storageKey:        'talkr-auth-token',    // stable key across deploys
+    storageKey:        'talker-auth-token',    // stable key across deploys
   },
 });
 

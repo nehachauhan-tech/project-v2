@@ -1,5 +1,5 @@
 -- ============================================================
--- Hirecheck - Migration 003: Enable Supabase Realtime
+-- Talker - Migration 003: Enable Supabase Realtime
 -- Run this in: Supabase Dashboard > SQL Editor
 --
 -- PURPOSE: Enables postgres_changes subscriptions so the chat

@@ -328,7 +328,7 @@ export default function ChatPage() {
     let authSub: { unsubscribe: () => void } | null = null;
     let mounted               = true;
 
-    const PROFILE_CACHE_KEY = 'talkr-profile-cache';
+    const PROFILE_CACHE_KEY = 'talker-profile-cache';
 
     const bootstrap = async () => {
       try {

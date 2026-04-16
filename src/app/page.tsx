@@ -91,7 +91,7 @@ export default function LandingPage() {
             <div className="w-9 h-9 rounded-xl bg-emerald-500 flex items-center justify-center">
               <MessageCircle className="w-5 h-5 text-black" strokeWidth={2.5} />
             </div>
-            <span className="text-lg font-bold tracking-tight">Hirecheck</span>
+            <span className="text-lg font-bold tracking-tight">Talker</span>
           </Link>
 
           <div className="hidden md:flex items-center gap-8">
@@ -259,7 +259,7 @@ export default function LandingPage() {
               <h2 className="text-4xl md:text-5xl font-bold tracking-tight mb-4">
                 Why{' '}
                 <span className="bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
-                  Hirecheck
+                  Talker
                 </span>
               </h2>
               <p className="text-white/40 text-lg max-w-lg mx-auto">
@@ -416,9 +416,9 @@ export default function LandingPage() {
               <div className="w-8 h-8 rounded-lg bg-emerald-500 flex items-center justify-center">
                 <MessageCircle className="w-4 h-4 text-black" strokeWidth={2.5} />
               </div>
-              <span className="font-bold">Hirecheck</span>
+              <span className="font-bold">Talker</span>
             </div>
-            <p className="text-sm text-white/30">&copy; 2026 Hirecheck. All rights reserved.</p>
+            <p className="text-sm text-white/30">&copy; 2026 Talker. All rights reserved.</p>
             <div className="flex gap-6 text-sm text-white/30">
               <a href="#" className="hover:text-white/60 transition-colors">Privacy</a>
               <a href="#" className="hover:text-white/60 transition-colors">Terms</a>

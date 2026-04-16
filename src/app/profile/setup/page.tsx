@@ -129,7 +129,7 @@ export default function ProfileSetupPage() {
           <div className="w-9 h-9 rounded-xl bg-emerald-500 flex items-center justify-center">
             <MessageCircle className="w-5 h-5 text-black" strokeWidth={2.5} />
           </div>
-          <span className="text-lg font-bold">Hirecheck</span>
+          <span className="text-lg font-bold">Talker</span>
         </div>
 
         <div className="glass rounded-2xl p-8 md:p-10">
